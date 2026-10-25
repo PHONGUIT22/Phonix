@@ -1,0 +1,19 @@
+# Phonix v2.0 - Micro-Router GBNF Grammar
+# Strictly constrains the local 1B SLM output to valid JSON matching RouterDecision schema:
+# {"selected_ast_frames": [...], "drop_irrelevant_frames": [...], "routing_decision": {"task_category": "...", "complexity_score": 0.88, "trigger_cloud_handoff": true}}
+
+root ::= "{" ws "\"selected_ast_frames\"" ws ":" ws string-list ws "," ws "\"drop_irrelevant_frames\"" ws ":" ws string-list ws "," ws "\"routing_decision\"" ws ":" ws routing-decision-obj ws "}"
+
+routing-decision-obj ::= "{" ws "\"task_category\"" ws ":" ws task-category ws "," ws "\"complexity_score\"" ws ":" ws float-val ws "," ws "\"trigger_cloud_handoff\"" ws ":" ws boolean-val ws "}"
+
+task-category ::= "\"code_completion\"" | "\"bug_fix\"" | "\"refactor\"" | "\"architecture_design\"" | "\"security_audit\"" | "\"boilerplate_generation\"" | "\"unit_test\"" | "\"documentation\""
+
+string-list ::= "[" ws (string (ws "," ws string)*)? ws "]"
+
+string ::= "\"" ([^"\\] | "\\" ["\\/bfnrt])* "\""
+
+float-val ::= ("0." [0-9]+) | "1.0" | "0" | "1"
+
+boolean-val ::= "true" | "false"
+
+ws ::= [ \t\n\r]*
