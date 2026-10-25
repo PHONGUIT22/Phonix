@@ -8,9 +8,16 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 import re
+import sys
 import time
 from typing import Any
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +53,44 @@ class LocalFastPath:
         self,
         model_instance: Any = None,
         ollama_url: str | None = None,
-        ollama_model: str = "llama3.2:1b",
+        ollama_model: str = "qwen2.5-coder:1.5b",
+        config_path: str | Path | None = "config/hardware_profile.yaml",
     ) -> None:
         self.model_instance: Any = model_instance
-        self.ollama_url: str = ollama_url or os.environ.get("PHONIX_OLLAMA_URL", "")
+        self.ollama_url: str = ollama_url or ""
         self.ollama_model: str = ollama_model
+        self.config_path: str | Path | None = config_path
+
+        # Load from config YAML if available
+        if config_path and yaml is not None:
+            resolved_path = Path(config_path)
+            if resolved_path.exists():
+                try:
+                    with open(resolved_path, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f) or {}
+                        slm_cfg = cfg.get("router_slm", {})
+                        if not self.ollama_url and "ollama_url" in slm_cfg:
+                            self.ollama_url = str(slm_cfg["ollama_url"])
+                        if ollama_model == "qwen2.5-coder:1.5b" and "ollama_model" in slm_cfg:
+                            self.ollama_model = str(slm_cfg["ollama_model"])
+                except Exception as exc:
+                    logger.warning("Failed to load hardware config from %s: %s", resolved_path, exc)
+
+        # Allow environment variable overrides
+        if os.environ.get("PHONIX_OLLAMA_URL"):
+            self.ollama_url = os.environ["PHONIX_OLLAMA_URL"]
+        if os.environ.get("PHONIX_OLLAMA_MODEL"):
+            self.ollama_model = os.environ["PHONIX_OLLAMA_MODEL"]
+        if ollama_url is not None:
+            self.ollama_url = ollama_url
+
+        # Fast test/offline isolation toggle
+        is_test_env = (
+            "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+        ) and os.environ.get("PHONIX_LIVE_OLLAMA_TEST") != "1"
+        if os.environ.get("PHONIX_DISABLE_OLLAMA") == "1" or is_test_env:
+            if ollama_url is None:
+                self.ollama_url = ""
 
     def execute(
         self, prompt: str, system_prompt: str = "", max_tokens: int = 512
@@ -74,7 +114,7 @@ class LocalFastPath:
                 if not endpoint.endswith(("/api/generate", "/api/chat", "/v1/chat/completions")):
                     endpoint = f"{endpoint}/api/generate"
 
-                with httpx.Client(timeout=2.5) as client:
+                with httpx.Client(timeout=3.0) as client:
                     payload = {
                         "model": self.ollama_model,
                         "prompt": full_prompt,

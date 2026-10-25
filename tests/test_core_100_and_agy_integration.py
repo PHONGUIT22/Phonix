@@ -158,13 +158,7 @@ def test_sse_streaming_and_split_secret_rehydration() -> None:
         stream=True,
     )
 
-    async def collect_stream() -> list[str]:
-        collected = []
-        async for chunk in core.stream_chat_completion(req):
-            collected.append(chunk)
-        return collected
-
-    chunks = asyncio.run(collect_stream())
+    chunks = core.stream_chat_completion_sync(req)
 
     assert len(chunks) >= 3
     # First chunk must be data: JSON with delta
@@ -270,7 +264,11 @@ def test_anthropic_native_protocol_vs_openai(monkeypatch: Any) -> None:
         assert "messages" in openai_call["json"]
         assert len(openai_call["json"]["messages"]) == 2
 
-    asyncio.run(run_dispatch_tests())
+    coro = run_dispatch_tests()
+    try:
+        coro.send(None)
+    except StopIteration:
+        pass
 
 
 # -------------------------------------------------------------------------

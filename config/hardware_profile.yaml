@@ -4,16 +4,18 @@
 profile_name: "workstation_edge_1b"
 device_target: "auto" # options: "cuda", "metal", "cpu", "auto"
 
-# Local 1B Micro-Router Resource Envelope
+# Local 1B/1.5B Micro-Router Resource Envelope
 router_slm:
-  model_id: "meta-llama/Llama-3.2-1B-Instruct"
-  local_model_path: "models/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+  model_id: "qwen2.5-coder:1.5b"
+  ollama_url: "http://localhost:11434"
+  ollama_model: "qwen2.5-coder:1.5b"
+  local_model_path: "models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
   quantization: "Q4_K_M"
-  vram_budget_mb: 1228.8 # 1.2 GB strictly enforced
+  vram_budget_mb: 1228.8 # 1.2 GB strictly enforced (qwen2.5-coder:1.5b is 986 MB)
   gpu_layers_offload: 16
   cpu_threads: 4
   context_window_tokens: 4096
-  temperature: 0.0 # Deterministic GBNF decoding
+  temperature: 0.0 # Deterministic GBNF / JSON Schema decoding
   top_p: 1.0
   repeat_penalty: 1.1
 

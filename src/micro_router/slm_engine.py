@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import sys
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -26,12 +27,42 @@ logger = logging.getLogger(__name__)
 
 
 class SLMEngine:
-    """Manages the 1B SLM instance with strict 1.2GB VRAM cap and GBNF-constrained decoding.
+    """Manages the 1B/1.5B SLM instance with strict 1.2GB VRAM cap and GBNF-constrained decoding.
 
     Performs exactly two responsibilities:
     1. Prunes candidate AST frames to preserve only task-critical context.
     2. Computes normalized task complexity score and cloud handoff flag.
     """
+
+    ROUTER_JSON_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "task_category": {
+                "type": "string",
+                "enum": [
+                    "boilerplate",
+                    "refactor",
+                    "debugging",
+                    "architecture",
+                    "security_audit",
+                    "general_qa",
+                ],
+            },
+            "complexity_score": {"type": "number"},
+            "requires_cloud_handoff": {"type": "boolean"},
+            "selected_ast_frames": {"type": "array", "items": {"type": "string"}},
+            "dropped_ast_frames": {"type": "array", "items": {"type": "string"}},
+            "reasoning_summary": {"type": "string"},
+        },
+        "required": [
+            "task_category",
+            "complexity_score",
+            "requires_cloud_handoff",
+            "selected_ast_frames",
+            "dropped_ast_frames",
+            "reasoning_summary",
+        ],
+    }
 
     SYSTEM_PROMPT: str = (
         "You are the Phonix v2.0 Micro-Router. Your task is to inspect candidate AST frames and user prompt, "
@@ -47,12 +78,14 @@ class SLMEngine:
         gpu_layers: int = 16,
         config_path: str | Path | None = "config/hardware_profile.yaml",
         ollama_url: str | None = None,
+        ollama_model: str = "qwen2.5-coder:1.5b",
     ) -> None:
         self.model_path: str = model_path
         self.vram_budget_mb: float = vram_budget_mb
         self.n_ctx: int = n_ctx
         self.gpu_layers: int = gpu_layers
-        self.ollama_url: str = ollama_url or os.environ.get("PHONIX_OLLAMA_URL", "")
+        self.ollama_url: str = ollama_url if ollama_url is not None else ""
+        self.ollama_model: str = ollama_model
 
         # Dynamically load hardware settings from YAML if available
         if config_path and yaml is not None:
@@ -67,8 +100,28 @@ class SLMEngine:
                         self.vram_budget_mb = float(slm_cfg.get("vram_budget_mb", self.vram_budget_mb))
                         self.n_ctx = int(slm_cfg.get("context_window_tokens", self.n_ctx))
                         self.gpu_layers = int(slm_cfg.get("gpu_layers_offload", self.gpu_layers))
+                        if not self.ollama_url and "ollama_url" in slm_cfg:
+                            self.ollama_url = str(slm_cfg["ollama_url"])
+                        if ollama_model == "qwen2.5-coder:1.5b" and "ollama_model" in slm_cfg:
+                            self.ollama_model = str(slm_cfg["ollama_model"])
                 except Exception as exc:
                     logger.warning("Failed to load hardware config from %s: %s", resolved_path, exc)
+
+        # Allow environment variable overrides
+        if os.environ.get("PHONIX_OLLAMA_URL"):
+            self.ollama_url = os.environ["PHONIX_OLLAMA_URL"]
+        if os.environ.get("PHONIX_OLLAMA_MODEL"):
+            self.ollama_model = os.environ["PHONIX_OLLAMA_MODEL"]
+        if ollama_url is not None:
+            self.ollama_url = ollama_url
+
+        # Fast test/offline isolation toggle
+        is_test_env = (
+            "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+        ) and os.environ.get("PHONIX_LIVE_OLLAMA_TEST") != "1"
+        if os.environ.get("PHONIX_DISABLE_OLLAMA") == "1" or is_test_env:
+            if ollama_url is None:
+                self.ollama_url = ""
 
         self.enforcer: GBNFEnforcer = GBNFEnforcer()
         self._llm: Any = None
@@ -127,20 +180,42 @@ class SLMEngine:
                         endpoint = f"{endpoint}/api/generate"
 
                     formatted_prompt = self._format_prompt(user_prompt, candidate_frames)
-                    with httpx.Client(timeout=2.0) as client:
-                        resp = client.post(
-                            endpoint,
-                            json={
-                                "model": "llama3.2:1b",
-                                "prompt": formatted_prompt,
-                                "format": "json",
-                                "stream": False,
-                                "options": {"temperature": 0.0},
-                            },
-                        )
+                    payload: dict[str, Any] = {
+                        "model": self.ollama_model,
+                        "prompt": formatted_prompt,
+                        "format": self.ROUTER_JSON_SCHEMA,
+                        "stream": False,
+                        "options": {"temperature": 0.0},
+                    }
+                    with httpx.Client(timeout=3.0) as client:
+                        resp = client.post(endpoint, json=payload)
+                        # Fallback for Ollama versions that only accept "json" string
+                        if resp.status_code == 400:
+                            payload["format"] = "json"
+                            resp = client.post(endpoint, json=payload)
+
                         if resp.status_code == 200:
                             raw_json = resp.json().get("response", "")
-                            return self.enforcer.parse_and_validate(raw_json)
+                            decision = self.enforcer.parse_and_validate(raw_json)
+
+                            # Sanitize frame sets to ensure only valid candidate IDs exist
+                            valid_candidate_set = set(candidate_ids)
+                            decision.selected_ast_frames = [
+                                fid for fid in decision.selected_ast_frames if fid in valid_candidate_set
+                            ]
+                            decision.dropped_ast_frames = [
+                                fid for fid in decision.dropped_ast_frames if fid in valid_candidate_set
+                            ]
+
+                            # Fallback if SLM wiped out all frames while candidates were present
+                            if not decision.selected_ast_frames and candidate_frames:
+                                fallback = self.enforcer.create_fallback_decision(
+                                    candidate_frames=candidate_frames, prompt=user_prompt
+                                )
+                                decision.selected_ast_frames = fallback.selected_ast_frames
+                                decision.dropped_ast_frames = fallback.dropped_ast_frames
+
+                            return decision
                 except Exception as exc:
                     logger.debug("Ollama router inference skipped/failed: %s", exc)
 
@@ -174,13 +249,21 @@ class SLMEngine:
             )
 
     def _format_prompt(self, user_prompt: str, candidate_frames: list[ASTFrame]) -> str:
-        """Constructs compact input prompt for 1B SLM router."""
+        """Constructs compact input prompt for 1B/1.5B SLM router."""
         frames_summary = [
             {"id": f.frame_id, "symbol": f.symbol_name, "tokens": f.token_count}
             for f in candidate_frames
         ]
+        guidelines = (
+            "CRITICAL INSTRUCTIONS:\n"
+            "- selected_ast_frames and dropped_ast_frames MUST ONLY contain exact IDs from Candidate Frames.\n"
+            "- Every candidate ID must be categorized into either selected_ast_frames or dropped_ast_frames.\n"
+            "- complexity_score MUST be a float between 0.0 and 1.0 (>= 0.7 sets requires_cloud_handoff: true; < 0.7 sets requires_cloud_handoff: false).\n"
+            "- task_category MUST be one of: boilerplate, refactor, debugging, architecture, security_audit, general_qa.\n"
+            "- Output valid JSON strictly following the schema."
+        )
         return (
-            f"<|system|>\n{self.SYSTEM_PROMPT}\n"
+            f"<|system|>\n{self.SYSTEM_PROMPT}\n{guidelines}\n"
             f"<|user|>\nUser Request: {user_prompt}\n"
             f"Candidate Frames: {json.dumps(frames_summary)}\n"
             f"<|assistant|>\n"

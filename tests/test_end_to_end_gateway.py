@@ -71,7 +71,7 @@ def test_sanitized_ast_context_injection_and_policy() -> None:
 
     # Invariant 1: Valid response envelope
     assert response.id.startswith("chatcmpl-")
-    assert response.model == "phonix-fast-path-stub"
+    assert response.model in ("phonix-fast-path-stub", "ollama:qwen2.5-coder:1.5b")
 
     # Invariant 2: Speculative matching successfully extracted target file
     routing = response.phonix_routing

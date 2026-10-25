@@ -190,7 +190,7 @@ class GatewayCore:
         self.policy_engine: PolicyEngine = PolicyEngine(config_path=policy_config_path)
         self.micro_router: SLMEngine = SLMEngine(config_path=hardware_config_path)
         self.circuit_breaker: CircuitBreaker = CircuitBreaker()
-        self.local_fast_path: LocalFastPath = LocalFastPath()
+        self.local_fast_path: LocalFastPath = LocalFastPath(config_path=hardware_config_path)
         self.cloud_dispatcher: CloudDispatcher = CloudDispatcher(config_path=upstreams_config_path)
         self.rehydrator: Rehydrator = Rehydrator()
         self.telemetry: AuditTelemetry = AuditTelemetry()
@@ -659,6 +659,20 @@ class GatewayCore:
         except StopIteration as exc:
             return exc.value
         raise RuntimeError("process_chat_completion could not finish synchronously.")
+
+    def stream_chat_completion_sync(self, request: ChatCompletionRequest) -> list[str]:
+        """Synchronous collector for stream_chat_completion in sandboxed environments."""
+        agen = self.stream_chat_completion(request)
+        chunks: list[str] = []
+        while True:
+            step = agen.__anext__()
+            try:
+                step.send(None)
+            except StopIteration as exc:
+                chunks.append(exc.value)
+            except StopAsyncIteration:
+                break
+        return chunks
 
 
 def create_gateway_app(workspace_root: str = ".") -> Any:
