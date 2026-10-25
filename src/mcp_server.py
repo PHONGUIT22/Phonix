@@ -262,6 +262,26 @@ class PhonixMCPServer:
                 eviction_res = self.core.frame_evictor.evict(paged_frames, token_budget=max_tokens)
                 retained_frames = eviction_res.retained_frames
 
+                # Optional Proprietary Moat Enhancement (private_moat)
+                moat_header = ""
+                try:
+                    from private_moat.behavioral_hotspot_engine import BehavioralHotspotEngine
+                    from private_moat.foveated_ast_compactor import FoveatedASTCompactor
+
+                    hotspot_eng = BehavioralHotspotEngine(workspace_root=self.core.workspace_root)
+                    retained_frames = hotspot_eng.rerank_and_expand_frames(
+                        user_prompt=query,
+                        candidate_frames=retained_frames,
+                    )
+                    compactor = FoveatedASTCompactor(top_k_focal=1)
+                    retained_frames, _, _ = compactor.compact_frames(
+                        frames=retained_frames,
+                        user_prompt=query,
+                    )
+                    moat_header = " [Phonix Pro Foveated]"
+                except (ImportError, Exception):
+                    moat_header = ""
+
                 # Step E: Zero-Trust AST Sanitization
                 rendered_blocks = []
                 total_tokens = 0
@@ -278,7 +298,7 @@ class PhonixMCPServer:
                     content_text = f"No AST frames matched query '{query}'. Candidate files checked: {candidate_files}"
                 else:
                     content_text = (
-                        f"Phonix Context MMU: Paged & Pruned {len(retained_frames)} AST frames ({total_tokens} tokens / budget {max_tokens}):\n\n"
+                        f"Phonix Context MMU{moat_header}: Paged & Pruned {len(retained_frames)} AST frames ({total_tokens} tokens / budget {max_tokens}):\n\n"
                         + "\n".join(rendered_blocks)
                     )
 

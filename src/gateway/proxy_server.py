@@ -365,6 +365,27 @@ class GatewayCore:
         retained_frames = eviction_res.retained_frames
         evicted_frames = eviction_res.evicted_frames
 
+        # Optional Proprietary Moat Enhancement (private_moat)
+        moat_mode = "community"
+        try:
+            from private_moat.behavioral_hotspot_engine import BehavioralHotspotEngine
+            from private_moat.foveated_ast_compactor import FoveatedASTCompactor
+
+            hotspot_engine = BehavioralHotspotEngine(workspace_root=self.workspace_root)
+            retained_frames = hotspot_engine.rerank_and_expand_frames(
+                user_prompt=user_prompt,
+                candidate_frames=retained_frames,
+            )
+            compactor = FoveatedASTCompactor(top_k_focal=1)
+            retained_frames, _, _ = compactor.compact_frames(
+                frames=retained_frames,
+                user_prompt=user_prompt,
+            )
+            moat_mode = "phonix-pro-foveated"
+        except (ImportError, Exception) as exc:
+            logger.debug("Running standard community AST context pipeline: %s", exc)
+            moat_mode = "community"
+
         # Step 3b & Gap 2: Zero-Trust Sanitization of Retained AST Frames & Context Assembly
         ast_context_blocks: list[str] = []
         context_tokens_injected = 0
@@ -420,6 +441,7 @@ class GatewayCore:
             router_decision,
             policy_decision,
             routing_eval,
+            moat_mode,
         )
 
     async def process_chat_completion(
@@ -440,6 +462,7 @@ class GatewayCore:
             router_decision,
             policy_decision,
             routing_eval,
+            moat_mode,
         ) = self._prepare_context_and_routing(request)
 
         # Step 7: Dual-Path Execution (Local Fast Path vs Cloud Upstream)
@@ -525,6 +548,7 @@ class GatewayCore:
                 "selected_frame_ids": [f.frame_id for f in retained_frames],
                 "evicted_frame_ids": [f.frame_id for f in evicted_frames],
                 "context_tokens_injected": context_tokens_injected,
+                "moat_mode": moat_mode,
             },
         )
 
@@ -551,6 +575,7 @@ class GatewayCore:
             router_decision,
             policy_decision,
             routing_eval,
+            moat_mode,
         ) = self._prepare_context_and_routing(request)
 
         raw_completion_text: str = ""
