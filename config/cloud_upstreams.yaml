@@ -1,0 +1,56 @@
+# Phonix v2.0 - Cloud Upstreams Configuration
+# Enterprise routing table, fallback timeouts, and circuit breaker policies
+
+gateway:
+  routing_strategy: "cost_and_complexity_adaptive"
+  complexity_cloud_threshold: 0.70 # Routing score > 0.70 triggers cloud handoff
+  request_timeout_seconds: 60.0
+
+upstreams:
+  anthropic:
+    display_name: "Anthropic Claude 3.5 Sonnet"
+    model: "claude-3-5-sonnet-20241022"
+    base_url: "https://api.anthropic.com/v1"
+    api_key_env: "ANTHROPIC_API_KEY"
+    timeout_seconds: 30.0
+    max_retries: 2
+    cost_per_1k_input_tokens: 0.003
+    cost_per_1k_output_tokens: 0.015
+    circuit_breaker:
+      failure_rate_threshold: 0.5
+      recovery_time_seconds: 60
+      sample_window: 10
+
+  openai:
+    display_name: "OpenAI GPT-4o"
+    model: "gpt-4o"
+    base_url: "https://api.openai.com/v1"
+    api_key_env: "OPENAI_API_KEY"
+    timeout_seconds: 25.0
+    max_retries: 2
+    cost_per_1k_input_tokens: 0.0025
+    cost_per_1k_output_tokens: 0.010
+    circuit_breaker:
+      failure_rate_threshold: 0.5
+      recovery_time_seconds: 60
+      sample_window: 10
+
+  deepseek:
+    display_name: "DeepSeek Coder V3"
+    model: "deepseek-coder"
+    base_url: "https://api.deepseek.com/v1"
+    api_key_env: "DEEPSEEK_API_KEY"
+    timeout_seconds: 35.0
+    max_retries: 3
+    cost_per_1k_input_tokens: 0.00014
+    cost_per_1k_output_tokens: 0.00028
+    circuit_breaker:
+      failure_rate_threshold: 0.6
+      recovery_time_seconds: 45
+      sample_window: 10
+
+# Fallback sequence when primary upstream fails or trips circuit breaker
+fallback_sequence:
+  - "anthropic"
+  - "openai"
+  - "deepseek"
