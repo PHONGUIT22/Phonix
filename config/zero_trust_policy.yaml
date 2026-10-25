@@ -1,0 +1,103 @@
+# Phonix v2.0 - Zero-Trust Policy Configuration
+# Defines formal egress verification, RBAC rules, token quotas, and AST literal redaction rules
+
+version: "2.0"
+policy_id: "corp-zero-trust-v2"
+enforcement_mode: "enforce" # options: "audit", "enforce", "strict_block"
+
+# Role-Based Access Control (RBAC) Rules
+rbac:
+  roles:
+    admin:
+      description: "Full system administration and unrestricted model access"
+      can_cloud_egress: true
+      can_bypass_pruning: true
+      can_view_telemetry: true
+      max_complexity_allowed: 1.0
+      allowed_upstreams: ["anthropic", "openai", "deepseek", "local"]
+    engineer:
+      description: "Standard software engineer with automated sanitization"
+      can_cloud_egress: true
+      can_bypass_pruning: false
+      can_view_telemetry: false
+      max_complexity_allowed: 0.95
+      allowed_upstreams: ["anthropic", "openai", "deepseek", "local"]
+    contractor:
+      description: "External contractor restricted to local fast path and strict sanitization"
+      can_cloud_egress: false
+      can_bypass_pruning: false
+      can_view_telemetry: false
+      max_complexity_allowed: 0.60
+      allowed_upstreams: ["local"]
+    auditor:
+      description: "Compliance and security auditor with read-only telemetry access"
+      can_cloud_egress: false
+      can_bypass_pruning: false
+      can_view_telemetry: true
+      max_complexity_allowed: 0.0
+      allowed_upstreams: ["local"]
+
+# Department Monthly Token Quotas
+department_quotas:
+  engineering:
+    monthly_token_budget: 10000000
+    hard_limit_action: "fallback_to_local"
+    alert_threshold_percent: 85
+  finance:
+    monthly_token_budget: 1000000
+    hard_limit_action: "reject"
+    alert_threshold_percent: 80
+  security:
+    monthly_token_budget: 5000000
+    hard_limit_action: "fallback_to_local"
+    alert_threshold_percent: 90
+  data_science:
+    monthly_token_budget: 20000000
+    hard_limit_action: "fallback_to_local"
+    alert_threshold_percent: 85
+
+# Semantic-Preserving AST Sanitizer Rules
+# Only sensitive literals are redacted; variable, method, and class names remain 100% intact.
+sanitization:
+  literal_rules:
+    - id: "aws_access_key"
+      category: "SECRET"
+      regex: "(?i)(AKIA|ABIA|ACCA)[0-9A-Z]{16}"
+      placeholder_prefix: "<REDACTED_AWS_KEY_"
+    - id: "generic_api_key"
+      category: "SECRET"
+      regex: "(?i)(api[_-]?key|secret[_-]?key|token)[\"']?\\s*[:=]\\s*[\"']([a-zA-Z0-9_\\-]{16,64})[\"']"
+      match_group: 2
+      placeholder_prefix: "<REDACTED_SECRET_"
+    - id: "jwt_token"
+      category: "SECRET"
+      regex: "ey[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}"
+      placeholder_prefix: "<REDACTED_JWT_"
+    - id: "private_key"
+      category: "SECRET"
+      regex: "-----BEGIN [A-Z ]+ PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]+ PRIVATE KEY-----"
+      placeholder_prefix: "<REDACTED_KEY_"
+    - id: "internal_ipv4"
+      category: "IP"
+      regex: "(?:10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3})"
+      placeholder_prefix: "<REDACTED_IP_"
+    - id: "pii_email"
+      category: "PII"
+      regex: "[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+"
+      placeholder_prefix: "<REDACTED_EMAIL_"
+    - id: "pii_ssn"
+      category: "PII"
+      regex: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+      placeholder_prefix: "<REDACTED_SSN_"
+
+# Z3 Formal Policy Egress Invariants
+egress_invariants:
+  - id: "no_unredacted_secrets_egress"
+    description: "Proof invariant: public cloud upstream payload must contain 0 unredacted secret tokens"
+    formal_rule: "forall token in payload: is_secret(token) => is_redacted(token)"
+  - id: "contractor_cloud_isolation"
+    description: "Proof invariant: contractor requests must evaluate cloud_dispatch = False"
+    formal_rule: "request.role == 'contractor' => cloud_dispatch == False"
+  - id: "quota_headroom_invariant"
+    description: "Proof invariant: remaining budget must be strictly positive before cloud dispatch"
+    formal_rule: "dept.consumed_tokens + request.estimated_tokens <= dept.monthly_token_budget"
