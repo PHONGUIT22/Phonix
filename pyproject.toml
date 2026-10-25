@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "phonix-gateway"
+version = "2.0.0"
+description = "Zero-Trust AST Paging & 1B Micro-Router Gateway (Enterprise Compliance & Cost Gateway + Context MMU)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Phonix Core Systems Team", email = "infra@phonix.ai" }
+]
+keywords = [
+    "zero-trust",
+    "ast-paging",
+    "micro-router",
+    "tree-sitter",
+    "mmu",
+    "compliance-gateway",
+    "z3-solver",
+    "local-slm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security",
+]
+
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.1",
+    "httpx>=0.27.0",
+    "tree-sitter>=0.21.0",
+    "z3-solver>=4.12.0",
+]
+
+[project.optional-dependencies]
+local-router = [
+    "llama-cpp-python>=0.2.75",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+phonix = "src.main:cli_entrypoint"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
