@@ -1,0 +1,24 @@
+{
+  "phonix-quota-and-security-gate": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python -m src.agy_hooks session-start",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "read_file|view_file|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m src.agy_hooks pre-tool-use",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
