@@ -1,0 +1,52 @@
+name: Phonix Zero-Trust & Micro-Router CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  compliance-and-tests:
+    name: Zero-Trust Policy Verification & Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository (Full History for AST Miner)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Core Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn pydantic z3-solver httpx pyyaml pytest
+
+      - name: Step 1 - Formal Z3 Policy Invariant Verification
+        run: |
+          python -m src.main verify-policy --role engineer --dept engineering
+
+      - name: Step 2 - Zero-Trust Secret Egress Invariant Check
+        run: |
+          python -m src.main verify-policy --role contractor --dept engineering --unredacted-secrets 1
+
+      - name: Step 3 - Mine Git History into Micro-Router SFT Dataset
+        run: |
+          python -m src.main build-dataset --max-commits 50 --output data/phonix_router_sft_dataset.jsonl
+          test -f data/phonix_router_sft_dataset.jsonl
+
+      - name: Step 4 - Validate LoRA Fine-Tuning Pipeline (Dry-Run)
+        run: |
+          python scripts/train_router_lora.py --dry-run
+
+      - name: Step 5 - Run Comprehensive Unit & Integration Test Suite
+        env:
+          PHONIX_DISABLE_OLLAMA: "1"
+        run: |
+          pytest tests/ -v

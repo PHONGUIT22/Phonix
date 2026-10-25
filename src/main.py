@@ -205,6 +205,42 @@ def run_mcp_server() -> None:
     server.run_stdio()
 
 
+def build_dataset_command(
+    max_commits: int = 50,
+    output_path: str = "data/phonix_router_sft_dataset.jsonl",
+    repo_path: str = _REPO_ROOT,
+) -> int:
+    """Mines Git commits and exports an SFT dataset for Micro-Router fine-tuning."""
+    from src.micro_router.data_flywheel import RouterDataFlywheel
+
+    print("=" * 65)
+    print(" Phonix v2.0 - Git-Commit AST Data Moat Miner & SFT Flywheel")
+    print("=" * 65)
+    flywheel = RouterDataFlywheel(workspace_root=repo_path)
+    print(f"[*] Mining up to {max_commits} recent commits in '{repo_path}'...")
+    samples = flywheel.mine_git_history(repo_path=repo_path, max_commits=max_commits)
+    count = flywheel.export_jsonl(samples, output_path=output_path)
+    stats = flywheel.calculate_statistics(samples)
+
+    print(f"[+] Successfully exported {count} training samples to '{output_path}'")
+    print("-" * 65)
+    print(" Dataset Summary Statistics:")
+    print(f"  - Total Mined Samples:        {stats['total_samples']}")
+    print(f"  - Selected AST Frames:        {stats['total_selected_frames']}")
+    print(f"  - Dropped AST Frames:         {stats['total_dropped_frames']}")
+    pruning_pct = stats['avg_pruning_ratio'] * 100.0 if stats['total_samples'] > 0 else 0.0
+    local_pct = stats.get('local_pct', 0.0)
+    cloud_pct = stats.get('cloud_pct', 0.0)
+    print(f"  - Average AST Pruning Ratio:  {pruning_pct:.1f}%")
+    print(f"  - Local Fast-Path Handoff:    {stats['local_count']} ({local_pct:.1f}%)")
+    print(f"  - Cloud Egress Handoff:       {stats['cloud_count']} ({cloud_pct:.1f}%)")
+    print("  - Task Categories:")
+    for cat, n in stats.get("category_distribution", {}).items():
+        print(f"      * {cat:16s}: {n} samples")
+    print("=" * 65)
+    return count
+
+
 def cli_entrypoint() -> None:
     """Command Line Interface entrypoint defined in pyproject.toml."""
     parser = argparse.ArgumentParser(
@@ -236,6 +272,17 @@ def cli_entrypoint() -> None:
     # mcp command
     subparsers.add_parser("mcp", help="Run Model Context Protocol stdio server")
 
+    # build-dataset command
+    dataset_parser = subparsers.add_parser(
+        "build-dataset", help="Mine Git history into Micro-Router SFT training dataset"
+    )
+    dataset_parser.add_argument(
+        "--max-commits", type=int, default=50, help="Maximum number of commits to mine"
+    )
+    dataset_parser.add_argument(
+        "--output", default="data/phonix_router_sft_dataset.jsonl", help="Output JSONL path"
+    )
+
     args = parser.parse_args()
 
     if args.command == "start":
@@ -248,6 +295,8 @@ def cli_entrypoint() -> None:
         install_agy()
     elif args.command == "mcp":
         run_mcp_server()
+    elif args.command == "build-dataset":
+        build_dataset_command(max_commits=args.max_commits, output_path=args.output)
     else:
         parser.print_help()
 

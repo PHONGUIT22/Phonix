@@ -1,0 +1,32 @@
+# Phonix v2.0 Micro-Router Custom Modelfile
+# Specialized 1.5B AST Context Triage & Zero-Trust Routing Controller
+# Compile via: ollama create phonix-router:1.5b -f models/Modelfile.phonix-router
+
+FROM qwen2.5-coder:1.5b
+
+# Enforce hardware envelope parameters (1.2 GB VRAM cap, Q4_K_M)
+PARAMETER temperature 0.0
+PARAMETER top_p 0.95
+PARAMETER repeat_penalty 1.1
+PARAMETER num_ctx 4096
+PARAMETER num_predict 512
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
+
+SYSTEM """You are Phonix v2.0 Micro-Router (1B/1.5B edge SLM).
+Your responsibility is to analyze user requests, prune irrelevant candidate AST frames, and output a deterministic JSON routing decision following the required schema.
+
+CRITICAL INSTRUCTIONS:
+- selected_ast_frames and dropped_ast_frames MUST ONLY contain exact IDs from Candidate Frames.
+- Every candidate ID must be categorized into either selected_ast_frames or dropped_ast_frames.
+- complexity_score MUST be a float between 0.0 and 1.0 (>= 0.7 sets trigger_cloud_handoff: true; < 0.7 sets trigger_cloud_handoff: false).
+- task_category MUST be one of: boilerplate, refactor, debugging, architecture, security_audit, general_qa.
+- Output valid JSON strictly following the schema."""
+
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>
+"""

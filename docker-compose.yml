@@ -1,0 +1,74 @@
+version: "3.8"
+
+networks:
+  phonix_zero_trust_net:
+    driver: bridge
+    internal: false
+
+volumes:
+  ollama_storage:
+  phonix_data:
+
+services:
+  # ----------------------------------------------------------------------------
+  # Sidecar 1: Local Ollama Micro-Router Engine (1.2GB VRAM Profile)
+  # ----------------------------------------------------------------------------
+  phonix-ollama:
+    image: ollama/ollama:latest
+    container_name: phonix-ollama-sidecar
+    networks:
+      - phonix_zero_trust_net
+    volumes:
+      - ollama_storage:/root/.ollama
+      - ./models/Modelfile.phonix-router:/root/Modelfile.phonix-router:ro
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        limits:
+          memory: 1536M # 1.5 GB memory envelope strictly protecting host resources
+          cpus: "4.0"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # Service 2: Phonix v2.0 Zero-Trust AST Gateway & Context MMU
+  # ----------------------------------------------------------------------------
+  phonix-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: phonix-gateway
+    networks:
+      - phonix_zero_trust_net
+    depends_on:
+      phonix-ollama:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - PHONIX_OLLAMA_URL=http://phonix-ollama:11434
+      - PHONIX_OLLAMA_MODEL=qwen2.5-coder:1.5b
+      - PHONIX_WORKSPACE_ROOT=/app
+    volumes:
+      # Zero-Trust read-only configuration mounts
+      - ./config:/app/config:ro
+      # SFT training dataset persistence
+      - phonix_data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: "2.0"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

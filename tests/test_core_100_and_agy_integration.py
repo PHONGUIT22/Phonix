@@ -49,6 +49,7 @@ from src.gateway.proxy_server import (
 from src.gateway.rehydrator import Rehydrator
 from src.gateway.semantic_sanitizer import SemanticSanitizer
 from src.mcp_server import PhonixMCPServer
+from src.micro_router.data_flywheel import RouterDataFlywheel
 
 
 # -------------------------------------------------------------------------
@@ -422,3 +423,72 @@ def test_antigravity_hooks_contract() -> None:
     finally:
         sys.stdin = old_stdin
         sys.stdout = old_stdout
+
+
+# -------------------------------------------------------------------------
+# Test 6: Router Data Flywheel & Dataset Miner
+# -------------------------------------------------------------------------
+def test_router_data_flywheel_and_dataset_builder() -> None:
+    """Verifies that RouterDataFlywheel correctly mines/formats SFT dataset samples."""
+    flywheel = RouterDataFlywheel(workspace_root=_REPO_ROOT)
+
+    # 1. Test task category and complexity scoring inference
+    assert flywheel._infer_task_category("feat(micro-router): add data flywheel", 150) == "refactor"
+    assert flywheel._infer_task_category("fix(sanitizer): patch regex boundary", 20) == "debugging"
+    assert flywheel._infer_task_category("security(gate): zero-trust check", 40) == "security_audit"
+    assert flywheel._infer_task_category("test(pager): add 2-hop tests", 15) == "boilerplate"
+    assert flywheel._infer_task_category("ci: add workflow", 50) == "architecture"
+
+    score_arch = flywheel._compute_complexity("architecture", modified_lines=150, selected_count=4, total_candidates=10)
+    assert score_arch >= 0.70
+
+    score_boiler = flywheel._compute_complexity("boilerplate", modified_lines=10, selected_count=1, total_candidates=5)
+    assert score_boiler < 0.60
+
+    # 2. Test live distillation recording
+    from src.micro_router.gbnf_enforcer import RouterDecisionOutput, RoutingDecision
+    from src.mmu.ast_slicer import ASTFrame
+
+    mock_frame = ASTFrame(
+        frame_id="src/math.py::add::01",
+        file_path="src/math.py",
+        symbol_name="add",
+        token_count=25,
+        raw_code="def add(a, b): return a + b",
+    )
+    decision = RouterDecisionOutput(
+        selected_ast_frames=["src/math.py::add::01"],
+        drop_irrelevant_frames=[],
+        routing_decision=RoutingDecision(
+            task_category="boilerplate",
+            complexity_score=0.25,
+            trigger_cloud_handoff=False,
+        ),
+    )
+    distill_sample = flywheel.record_live_distillation_sample(
+        prompt="Write addition function",
+        candidate_frames=[mock_frame],
+        decision=decision,
+    )
+    assert len(distill_sample["messages"]) == 3
+    assert distill_sample["messages"][0]["role"] == "system"
+    assert distill_sample["messages"][1]["role"] == "user"
+    assert distill_sample["messages"][2]["role"] == "assistant"
+    res_json = json.loads(distill_sample["messages"][2]["content"])
+    assert res_json["selected_ast_frames"] == ["src/math.py::add::01"]
+    assert res_json["routing_decision"]["trigger_cloud_handoff"] is False
+
+    # 3. Test export_jsonl and calculate_statistics
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as tmp:
+        tmp_path = tmp.name
+
+    try:
+        exported_count = flywheel.export_jsonl([distill_sample], output_path=tmp_path)
+        assert exported_count == 1
+        stats = flywheel.calculate_statistics([distill_sample])
+        assert stats["total_samples"] == 1
+        assert stats["local_count"] == 1
+        assert stats["cloud_count"] == 0
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
