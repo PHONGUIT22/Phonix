@@ -486,3 +486,30 @@ def test_v21_multi_query_and_surgical_edit(tmp_path: Path) -> None:
     assert edit_route_res["success"] is True
     assert "line5_modified" in test_file.read_text(encoding="utf-8")
 
+
+def test_foreign_workspace_auto_sanitization(tmp_path: Path) -> None:
+    """Verifies that indexing a foreign workspace cleans legacy private_moat and centralizes vault."""
+    foreign_repo = tmp_path / "mock-foreign-repo"
+    foreign_repo.mkdir(parents=True, exist_ok=True)
+
+    # 1. Simulate legacy private_moat artifact in foreign workspace
+    legacy_moat = foreign_repo / "private_moat"
+    legacy_moat.mkdir(parents=True, exist_ok=True)
+    (legacy_moat / "stale.json").write_text("{}", encoding="utf-8")
+    assert legacy_moat.exists()
+
+    # Indexing must automatically sanitize foreign workspace
+    core = GatewayCore(workspace_root=str(foreign_repo), auto_index=True)
+    assert not legacy_moat.exists()
+
+    # 2. BehavioralHotspotEngine must target central vault, never foreign workspace
+    try:
+        from private_moat.behavioral_hotspot_engine import BehavioralHotspotEngine, PHONIX_REPO_ROOT
+
+        engine = BehavioralHotspotEngine(workspace_root=str(foreign_repo))
+        assert not (foreign_repo / "private_moat").exists()
+        assert engine.vault_dir == PHONIX_REPO_ROOT / "private_moat" / "vault"
+        assert engine.graph_filename == "mock-foreign-repo_behavioral_graph.json"
+    except ImportError:
+        pass
+

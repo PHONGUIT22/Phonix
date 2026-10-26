@@ -309,6 +309,19 @@ class GatewayCore:
         # Auto-inject PhonixHP.md quota armor into target workspace
         _ensure_phonix_hp_rule(root_dir)
 
+        # Auto-sanitize foreign workspace: eliminate target workspace pollution
+        try:
+            ws_resolved = Path(root_dir).resolve()
+            if ws_resolved != PHONIX_REPO_ROOT:
+                legacy_moat = ws_resolved / "private_moat"
+                if legacy_moat.exists():
+                    import shutil
+
+                    shutil.rmtree(legacy_moat, ignore_errors=True)
+                    logger.info("Auto-sanitized foreign workspace: removed legacy '%s'", legacy_moat)
+        except Exception as e_clean:
+            logger.debug("Failed auto-sanitizing legacy private_moat in '%s': %s", root_dir, e_clean)
+
         for dirpath, dirnames, filenames in os.walk(root_dir):
             # Prune ignored directories in-place so os.walk does not recurse into them
             dirnames[:] = [
