@@ -100,6 +100,28 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
         except Exception as exc:
             logger.debug("Could not write rule to %s: %s", r_path, exc)
 
+    # 2b. Global Tool Schemas for agy lazy-loading
+    try:
+        from src.mcp_server import PhonixMCPServer
+
+        tools = PhonixMCPServer.get_tool_definitions()
+        for sdir in [
+            home_gemini / "antigravity-cli" / "mcp" / "phonix-mmu",
+            home_gemini / "antigravity" / "mcp" / "phonix-mmu",
+        ]:
+            sdir.mkdir(parents=True, exist_ok=True)
+            for t in tools:
+                tool_schema = {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t.get("inputSchema", {}),
+                }
+                out_path = sdir / f"{t['name']}.json"
+                out_path.write_text(json.dumps(tool_schema, indent=2), encoding="utf-8")
+            logger.info("Synchronized tool schemas in %s", sdir)
+    except Exception as exc:
+        logger.debug("Could not write MCP tool schemas: %s", exc)
+
     # 3. Global hooks.json (~/.gemini/config/hooks.json & ~/.gemini/hooks.json)
     py_exec_str = f'"{py_exec}"' if " " in str(py_exec) else str(py_exec)
     hooks_script_str = f'"{hooks_script}"' if " " in str(hooks_script) else str(hooks_script)

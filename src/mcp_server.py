@@ -112,8 +112,17 @@ class PhonixMCPServer:
         siblings_container = repo_root.parent  # D:\UIT\NamBonUIT
 
         if siblings_container.is_dir():
+            sub_queries = [q.strip() for q in query.split("|") if q.strip()]
             tokens = set(re.findall(r"[a-zA-Z0-9_\-\.]+", query_lower))
+
+            GENERIC_TOKENS = {
+                "src", "app", "lib", "test", "tests", "page", "index", "route",
+                "layout", "main", "types", "data", "components", "api", "public",
+                "default", "styles", "style", "utils", "config", "constants", "tsx", "ts", "js", "jsx"
+            }
+
             try:
+                scores: dict[str, int] = {}
                 for sibling in siblings_container.iterdir():
                     if not sibling.is_dir() or sibling.name.startswith("."):
                         continue
@@ -125,30 +134,36 @@ class PhonixMCPServer:
                     ):
                         continue
 
-                    sib_path_str = str(sibling.resolve())
-                    # Check if sibling directory name or any file in sibling matches query tokens
-                    if sibling.name.lower() in tokens or any(
-                        t in sibling.name.lower() for t in tokens if len(t) >= 5
-                    ):
-                        return self._get_or_create_core(sib_path_str)
+                    score = 0
+                    sib_name_lower = sibling.name.lower()
+                    if sib_name_lower in query_lower:
+                        score += 250
+                    elif any(t in sib_name_lower for t in tokens if len(t) >= 5 and t not in GENERIC_TOKENS):
+                        score += 150
 
-                    # Check for file existence in sibling src, app, lib, or root
-                    for sub in ("src", "app", "lib", ""):
-                        search_dir = sibling / sub if sub else sibling
+                    # Check exact paths from query
+                    for q in sub_queries:
+                        clean_q = q.strip().replace("\\", "/").strip("/'\"")
+                        if (sibling / clean_q).is_file():
+                            score += 500
+                        # Check slug occurrences in candidate files
+                        if len(q) >= 6 and ("-" in q or "_" in q):
+                            for sub in ("src/lib", "src", "app", "lib"):
+                                sdir = sibling / sub
+                                if sdir.is_dir():
+                                    for f in sdir.glob("*.ts"):
+                                        try:
+                                            if q in f.read_text(encoding="utf-8", errors="ignore"):
+                                                score += 300
+                                                break
+                                        except Exception:
+                                            pass
+
+                    # Non-generic file name matches in sibling folders
+                    for sub in ("src", "app", "lib"):
+                        search_dir = sibling / sub
                         if not search_dir.is_dir():
                             continue
-                        if sub == "":
-                            try:
-                                for entry in search_dir.iterdir():
-                                    if entry.is_file():
-                                        fname_lower = entry.name.lower()
-                                        base_lower = os.path.splitext(fname_lower)[0]
-                                        if fname_lower in tokens or base_lower in tokens:
-                                            return self._get_or_create_core(sib_path_str)
-                            except Exception:
-                                pass
-                            continue
-
                         for root, dirs, files in os.walk(search_dir):
                             dirs[:] = [
                                 d for d in dirs
@@ -157,24 +172,30 @@ class PhonixMCPServer:
                             for fname in files:
                                 fname_lower = fname.lower()
                                 base_lower = os.path.splitext(fname_lower)[0]
-                                if (
-                                    fname_lower in tokens
-                                    or base_lower in tokens
-                                    or any(t == base_lower for t in tokens)
-                                ):
-                                    logger.info(
-                                        "Smart Workspace Switch: Routing query '%s' to sibling project %s",
-                                        query,
-                                        sibling.name,
-                                    )
-                                    return self._get_or_create_core(sib_path_str)
+                                if base_lower not in GENERIC_TOKENS:
+                                    if fname_lower in tokens or base_lower in tokens:
+                                        score += 80
+
+                    if score > 0:
+                        scores[str(sibling.resolve())] = score
+
+                if scores:
+                    best_sib = max(scores.items(), key=lambda x: x[1])[0]
+                    logger.info(
+                        "Smart Workspace Switch: Routing query '%s' to best sibling project %s (score=%d)",
+                        query,
+                        Path(best_sib).name,
+                        scores[best_sib],
+                    )
+                    return self._get_or_create_core(best_sib)
             except Exception as e_scan:
                 logger.debug("Sibling workspace scan error: %s", e_scan)
 
         return current_core
 
-    def get_tool_definitions(self) -> list[dict[str, Any]]:
-        """Returns the 3 primary MCP tools exposed to coding CLI agents."""
+    @staticmethod
+    def get_tool_definitions() -> list[dict[str, Any]]:
+        """Returns the primary MCP tools exposed to coding CLI agents."""
         return [
             {
                 "name": "phonix_repo_map",
@@ -195,21 +216,26 @@ class PhonixMCPServer:
             {
                 "name": "phonix_get_pruned_context",
                 "description": (
-                    "Retrieves pruned, 1-hop/2-hop call-graph expanded, and Zero-Trust sanitized "
-                    "AST frames (< 512 tokens/frame) for a coding task or file path. "
-                    "Saves 75-85% context quota compared to reading full files."
+                    "Retrieves pruned AST frames or verbatim [Lines X-Y] edit windows for one or more files, "
+                    "data slugs, or text anchors separated by '|' (multi-query batching). "
+                    "Use for_edit=True for verbatim copy-pasteable lines preserving exact whitespace."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Task description, symbol name, or file path",
+                            "description": "Task description, symbol name, file path, or multiple targets separated by '|' (e.g. 'file.tsx | slug-name | anchorText')",
                         },
                         "max_tokens": {
                             "type": "integer",
                             "description": "Maximum token budget for returned AST context (default: 1536)",
                             "default": 1536,
+                        },
+                        "for_edit": {
+                            "type": "boolean",
+                            "description": "When true (default for edits/slugs), returns verbatim [Lines X-Y] windows with exact whitespace for direct edit_file/phonix_surgical_edit copy-paste.",
+                            "default": True,
                         },
                     },
                     "required": ["query"],
@@ -240,6 +266,42 @@ class PhonixMCPServer:
                         },
                     },
                     "required": ["text"],
+                },
+            },
+            {
+                "name": "phonix_surgical_edit",
+                "description": (
+                    "Apply one or more exact target->replacement edits to a file in a single step with "
+                    "automatic Windows CRLF (\\r\\n) vs LF (\\n) line-ending normalization. "
+                    "Prevents edit_file newline mismatch loops."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Relative or absolute path to the target file",
+                        },
+                        "edits": {
+                            "type": "array",
+                            "description": "List of exact replacements to apply sequentially",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "target": {
+                                        "type": "string",
+                                        "description": "Exact text or lines to be replaced",
+                                    },
+                                    "replacement": {
+                                        "type": "string",
+                                        "description": "Replacement text or lines",
+                                    },
+                                },
+                                "required": ["target", "replacement"],
+                            },
+                        },
+                    },
+                    "required": ["file_path", "edits"],
                 },
             },
         ]
@@ -325,10 +387,161 @@ class PhonixMCPServer:
             f"{map_text}"
         )
 
+    def _extract_verbatim_windows(
+        self,
+        core: GatewayCore,
+        sub_queries: list[str],
+        max_tokens: int = 1536,
+    ) -> list[str]:
+        """Extracts exact verbatim edit windows with exact [Lines X-Y] line numbers."""
+        ws_path = Path(core.workspace_root)
+        windows: list[str] = []
+        seen_regions: set[tuple[str, int, int]] = set()
+
+        # Fast search list of source files (prioritize src/, app/, lib/)
+        scan_dirs = [ws_path / d for d in ("src", "app", "lib") if (ws_path / d).is_dir()]
+        if not scan_dirs:
+            scan_dirs = [ws_path]
+
+        candidate_files: list[Path] = []
+        for sdir in scan_dirs:
+            for root, dirs, files in os.walk(sdir):
+                dirs[:] = [d for d in dirs if d not in GatewayCore.IGNORED_DIRS and not d.startswith(".")]
+                for f in files:
+                    if f.endswith((".ts", ".tsx", ".js", ".jsx", ".json", ".py", ".html", ".css", ".md")):
+                        candidate_files.append(Path(root) / f)
+
+        for raw_q in sub_queries:
+            sub_q = raw_q.strip()
+            if not sub_q:
+                continue
+
+            clean_q = sub_q.replace("\\", "/").strip("'\"")
+
+            # Case A: Is clean_q a file path in workspace?
+            file_match: Path | None = None
+            if (ws_path / clean_q).is_file():
+                file_match = ws_path / clean_q
+            elif " " not in clean_q:
+                for cand in candidate_files:
+                    if cand.name.lower() == Path(clean_q).name.lower():
+                        file_match = cand
+                        break
+
+            if file_match is not None and " " not in clean_q and (clean_q.endswith((".tsx", ".ts", ".jsx", ".js", ".py", ".json", ".html", ".css", ".md", ".yaml", ".yml")) or "/" in clean_q):
+                rel_path = str(file_match.relative_to(ws_path)).replace("\\", "/")
+                content = file_match.read_text(encoding="utf-8", errors="ignore")
+                lines = content.splitlines()
+                total_lines = len(lines)
+
+                if total_lines <= 120:
+                    region = (rel_path, 1, total_lines)
+                    if region not in seen_regions:
+                        seen_regions.add(region)
+                        windows.append(
+                            f"=== Verbatim Edit Window: {rel_path} [Lines 1-{total_lines}] ===\n{content}"
+                        )
+                    continue
+                else:
+                    top_lines = "\n".join(lines[:50])
+                    region = (rel_path, 1, 50)
+                    if region not in seen_regions:
+                        seen_regions.add(region)
+                        windows.append(
+                            f"=== Verbatim Edit Window: {rel_path} [Lines 1-50] ({total_lines} total lines) ===\n{top_lines}"
+                        )
+                    continue
+
+            # Case B: Slug or Pattern search across workspace source files
+            for cand_file in candidate_files:
+                try:
+                    cand_text = cand_file.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+
+                if sub_q not in cand_text:
+                    continue
+
+                rel_path = str(cand_file.relative_to(ws_path)).replace("\\", "/")
+                lines = cand_text.splitlines()
+
+                # Find line numbers containing sub_q
+                for idx, line in enumerate(lines):
+                    if sub_q not in line:
+                        continue
+
+                    is_slug = "slug:" in line or "slug" in line
+
+                    if is_slug:
+                        # 1. Header / metadata window
+                        obj_start = idx
+                        while obj_start > 0 and not lines[obj_start].strip().startswith("{") and (idx - obj_start) < 10:
+                            obj_start -= 1
+
+                        header_end = idx
+                        while header_end < len(lines) and (header_end - idx) < 40:
+                            cur_l = lines[header_end].strip()
+                            if cur_l.startswith("faqItems:") or cur_l.startswith("contentHtml:") or ("slug:" in cur_l and header_end > idx):
+                                break
+                            header_end += 1
+
+                        h_start_num = obj_start + 1
+                        h_end_num = header_end
+                        h_region = (rel_path, h_start_num, h_end_num)
+                        if h_region not in seen_regions:
+                            seen_regions.add(h_region)
+                            h_content = "\n".join(lines[obj_start:header_end])
+                            windows.append(
+                                f"=== Verbatim Edit Window: {rel_path} [Lines {h_start_num}-{h_end_num}] ===\n{h_content}"
+                            )
+
+                        # 2. Closing / FAQ window
+                        faq_start = None
+                        faq_end = None
+                        for k in range(idx, min(idx + 180, len(lines))):
+                            if "faqItems:" in lines[k]:
+                                faq_start = k
+                                break
+                            if "slug:" in lines[k] and k > idx:
+                                break
+
+                        if faq_start is not None:
+                            depth = 0
+                            for k in range(faq_start, min(faq_start + 120, len(lines))):
+                                depth += lines[k].count("[") - lines[k].count("]")
+                                if depth <= 0 and k > faq_start:
+                                    faq_end = k + 1
+                                    break
+                            if faq_end is not None:
+                                f_start_num = faq_start + 1
+                                f_end_num = faq_end
+                                f_region = (rel_path, f_start_num, f_end_num)
+                                if f_region not in seen_regions:
+                                    seen_regions.add(f_region)
+                                    f_content = "\n".join(lines[faq_start:faq_end])
+                                    windows.append(
+                                        f"=== Verbatim Edit Window: {rel_path} [Lines {f_start_num}-{f_end_num}] ===\n{f_content}"
+                                    )
+                        break
+                    else:
+                        # General anchor match (table row, heading, anchor)
+                        w_start = max(0, idx - 10)
+                        w_end = min(len(lines), idx + 15)
+                        w_region = (rel_path, w_start + 1, w_end)
+                        if w_region not in seen_regions:
+                            seen_regions.add(w_region)
+                            w_content = "\n".join(lines[w_start:w_end])
+                            windows.append(
+                                f"=== Verbatim Edit Window: {rel_path} [Lines {w_start + 1}-{w_end}] ===\n{w_content}"
+                            )
+                        break
+        return windows
+
     def _tool_get_pruned_context(
         self,
         query: str = "",
         max_tokens: int = 1536,
+        for_edit: bool = True,
         workspace_root: str | None = None,
         target_files: list[str] | None = None,
     ) -> str:
@@ -338,6 +551,7 @@ class PhonixMCPServer:
             {
                 "query": query,
                 "max_tokens": max_tokens,
+                "for_edit": for_edit,
                 "workspace_root": workspace_root or os.environ.get("PHONIX_WORKSPACE") or os.getcwd(),
                 "target_files": target_files or [],
             },
@@ -346,6 +560,16 @@ class PhonixMCPServer:
             return remote
 
         core = self._resolve_active_core(query=query, explicit_workspace=workspace_root)
+        sub_queries = [q.strip() for q in query.split("|") if q.strip()]
+
+        # Fast exact pattern / slug / file window extraction when for_edit is requested or multi-query
+        if for_edit or len(sub_queries) > 1 or any("-" in q or "/" in q for q in sub_queries):
+            windows = self._extract_verbatim_windows(core, sub_queries, max_tokens=max_tokens)
+            if windows:
+                return (
+                    f"Phonix Context MMU v2.1 [Verbatim Edit Windows]: Located {len(windows)} target region(s) in '{Path(core.workspace_root).name}':\n\n"
+                    + "\n\n".join(windows)
+                )
 
         # Step A: Speculative Trie matching for file paths
         core.speculative_inspector.reset_stream()
@@ -529,6 +753,94 @@ class PhonixMCPServer:
             f"[Sanitized Text Preview]\n{san.sanitized_text[:500]}"
         )
 
+    def _tool_surgical_edit(
+        self,
+        file_path: str,
+        edits: list[dict[str, str]],
+        workspace_root: str | None = None,
+    ) -> str:
+        """Applies atomic sequential target->replacement edits with automatic CRLF/LF normalization."""
+        remote = self._try_http_gateway(
+            "/v1/mmu/surgical-edit",
+            {
+                "file_path": file_path,
+                "edits": edits,
+                "workspace_root": workspace_root or os.environ.get("PHONIX_WORKSPACE") or os.getcwd(),
+            },
+        )
+        if remote is not None:
+            return remote
+
+        core = self._resolve_active_core(query=file_path, explicit_workspace=workspace_root)
+        ws_path = Path(core.workspace_root)
+
+        target = Path(file_path)
+        if not target.is_absolute():
+            target = ws_path / target
+        if not target.is_file():
+            # Fallback search in workspace
+            matches = [
+                cand for cand in ws_path.rglob(f"*{Path(file_path).name}")
+                if not any(part in cand.parts for part in GatewayCore.IGNORED_DIRS)
+            ]
+            if matches:
+                target = matches[0]
+            else:
+                raise FileNotFoundError(f"File '{file_path}' not found in '{ws_path}'")
+
+        raw_bytes = target.read_bytes()
+        is_crlf = b"\r\n" in raw_bytes
+        content = raw_bytes.decode("utf-8", errors="replace")
+
+        applied_count = 0
+        for idx, edit in enumerate(edits, start=1):
+            target_str = edit.get("target", "")
+            replacement_str = edit.get("replacement", "")
+            if not target_str:
+                continue
+
+            # 1. Exact match attempt
+            if target_str in content:
+                content = content.replace(target_str, replacement_str, 1)
+                applied_count += 1
+                continue
+
+            # 2. CRLF/LF normalized match attempt
+            norm_content = content.replace("\r\n", "\n")
+            norm_target = target_str.replace("\r\n", "\n")
+            norm_replacement = replacement_str.replace("\r\n", "\n")
+
+            if norm_target in norm_content:
+                norm_content = norm_content.replace(norm_target, norm_replacement, 1)
+                if is_crlf:
+                    content = norm_content.replace("\n", "\r\n")
+                else:
+                    content = norm_content
+                applied_count += 1
+            else:
+                raise ValueError(
+                    f"Edit #{idx} failed: target string not found in '{file_path}'. "
+                    f"Target snippet: {target_str[:80]!r}"
+                )
+
+        # Atomic write back
+        target.write_bytes(content.encode("utf-8"))
+
+        # Re-index target file in GatewayCore
+        try:
+            rel_str = str(target.relative_to(ws_path)).replace("\\", "/")
+            frames = core.ast_slicer.slice_file(str(target))
+            core._file_to_frames[rel_str] = frames
+            for f in frames:
+                core._frame_registry[f.frame_id] = f
+        except Exception:
+            pass
+
+        return (
+            f"[Phonix Surgical Edit] Successfully applied {applied_count}/{len(edits)} edit(s) to '{target.name}' "
+            f"({len(content.splitlines())} lines, line endings: {'CRLF' if is_crlf else 'LF'})."
+        )
+
     def _dispatch_tool_call(
         self, req_id: Any, tool_name: str, args: dict[str, Any]
     ) -> dict[str, Any]:
@@ -552,6 +864,7 @@ class PhonixMCPServer:
                 res = self._tool_get_pruned_context(
                     query=args.get("query", ""),
                     max_tokens=int(args.get("max_tokens", 1536)),
+                    for_edit=bool(args.get("for_edit", True)),
                     workspace_root=args.get("workspace_root"),
                     target_files=args.get("target_files", []),
                 )
@@ -572,6 +885,21 @@ class PhonixMCPServer:
                     role=role,
                     department=department,
                     target_upstream=target_upstream,
+                    workspace_root=args.get("workspace_root"),
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {"content": [{"type": "text", "text": res}], "isError": False},
+                }
+
+            # 4. phonix_surgical_edit
+            elif tool_name == "phonix_surgical_edit":
+                file_path = args.get("file_path", "")
+                edits = args.get("edits", [])
+                res = self._tool_surgical_edit(
+                    file_path=file_path,
+                    edits=edits,
                     workspace_root=args.get("workspace_root"),
                 )
                 return {

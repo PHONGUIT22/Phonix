@@ -420,3 +420,69 @@ def test_http_mmu_and_z3_endpoints() -> None:
     assert after_reqs >= initial_reqs + 3
     assert getattr(app.state.core, "total_requests", 0) >= initial_reqs + 3
 
+
+def test_v21_multi_query_and_surgical_edit(tmp_path: Path) -> None:
+    """Verifies Phonix v2.1 multi-query verbatim windows and CRLF-safe surgical edit."""
+    def run_coro(coro: Any) -> Any:
+        try:
+            coro.send(None)
+        except StopIteration as exc:
+            return exc.value
+        raise RuntimeError("Coroutine did not finish synchronously.")
+
+    from src.mcp_server import PhonixMCPServer
+    from src.gateway.proxy_server import create_app
+
+    server = PhonixMCPServer(workspace_root=str(_REPO_ROOT))
+
+    # 1. Multi-query batching with for_edit=True
+    pruned_res = server._tool_get_pruned_context(
+        query="src/main.py | auto_bootstrap_agy_environment",
+        for_edit=True,
+    )
+    assert "=== Verbatim Edit Window:" in pruned_res
+    assert "[Lines " in pruned_res
+    assert "auto_bootstrap_agy_environment" in pruned_res
+
+    # 2. CRLF-safe surgical edit test
+    test_file = tmp_path / "sample.ts"
+    # Write CRLF file
+    test_file.write_bytes(b"line1\r\nold_block_start\r\nold_content\r\nold_block_end\r\nline5\r\n")
+
+    # Pass LF strings as target/replacement - should match CRLF transparently
+    res = server._tool_surgical_edit(
+        file_path=str(test_file),
+        edits=[
+            {
+                "target": "old_block_start\nold_content\nold_block_end",
+                "replacement": "new_block_start\nnew_content\nnew_block_end",
+            }
+        ],
+        workspace_root=str(tmp_path),
+    )
+    assert "[Phonix Surgical Edit]" in res
+    assert "1/1 edit(s)" in res
+    assert "CRLF" in res
+
+    # Verify content and that CRLF was preserved
+    updated_bytes = test_file.read_bytes()
+    assert b"new_block_start\r\nnew_content\r\nnew_block_end" in updated_bytes
+    assert b"\r\n" in updated_bytes
+
+    # 3. HTTP daemon /v1/mmu/surgical-edit route
+    app = create_app(workspace_root=str(tmp_path))
+    routes = {r.path: r.endpoint for r in app.routes if hasattr(r, "path")}
+    assert "/v1/mmu/surgical-edit" in routes
+
+    edit_route_res = run_coro(
+        routes["/v1/mmu/surgical-edit"](
+            {
+                "file_path": str(test_file),
+                "edits": [{"target": "line5", "replacement": "line5_modified"}],
+                "workspace_root": str(tmp_path),
+            }
+        )
+    )
+    assert edit_route_res["success"] is True
+    assert "line5_modified" in test_file.read_text(encoding="utf-8")
+
