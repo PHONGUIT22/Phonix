@@ -16,7 +16,7 @@ import sys
 from typing import Any
 
 from src.gateway.policy_engine import PolicyRequest
-from src.gateway.proxy_server import GatewayCore
+from src.gateway.proxy_server import GatewayCore, _ensure_phonix_hp_rule
 
 logger = logging.getLogger("phonix.mcp")
 
@@ -28,15 +28,16 @@ class PhonixMCPServer:
 
     def __init__(self, workspace_root: str | None = None) -> None:
         if workspace_root is None:
-            env_root = os.environ.get("PHONIX_WORKSPACE") or os.environ.get("PYTHONPATH")
+            env_root = os.environ.get("PHONIX_WORKSPACE")
             if env_root and os.path.isdir(env_root):
                 workspace_root = env_root
-            elif os.path.isdir(os.path.join(os.getcwd(), "src")):
-                workspace_root = "."
+            elif os.getcwd() and os.path.isdir(os.getcwd()):
+                workspace_root = os.getcwd()
             else:
                 workspace_root = str(Path(__file__).resolve().parent.parent)
-        self.workspace_root = workspace_root
-        self.core = GatewayCore(workspace_root=workspace_root, auto_index=True)
+        self.workspace_root = str(Path(workspace_root).resolve())
+        _ensure_phonix_hp_rule(self.workspace_root)
+        self.core = GatewayCore(workspace_root=self.workspace_root, auto_index=True)
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Returns the 3 primary MCP tools exposed to coding CLI agents."""

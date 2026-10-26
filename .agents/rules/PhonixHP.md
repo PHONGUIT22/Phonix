@@ -1,6 +1,6 @@
-# Phonix v2.0 Zero-Trust & Context MMU Quota Rules
+# Phonix v2.0 Zero-Trust & Context MMU Quota Rules (PhonixHP)
 
-You are operating within a codebase protected by **Phonix v2.0 Context MMU & Zero-Trust Gateway**.
+You are operating within a codebase protected by **Phonix v2.0 Context MMU & Zero-Trust Gateway** (PhonixHP Quota Armor).
 
 ## 1. Developer Quota Protection (CRITICAL)
 - **NEVER** use `read_file` or `view_file` to ingest large source files (> 100 lines) when exploring or modifying specific classes or functions.

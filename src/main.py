@@ -20,7 +20,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from src.gateway.policy_engine import PolicyEngine, PolicyRequest
-from src.gateway.proxy_server import create_gateway_app
+from src.gateway.proxy_server import GatewayCore, _ensure_phonix_hp_rule, create_gateway_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -183,10 +183,11 @@ def install_agy(repo_root: str = _REPO_ROOT) -> int:
             json.dump(hooks_content, f, indent=2)
     print(f" [PASS] Verified hooks configuration at {hooks_file}")
 
-    # 4. Verify .agents/rules/GEMINI.md
+    # 4. Verify .agents/rules/PhonixHP.md
     rules_dir = agents_dir / "rules"
     rules_dir.mkdir(parents=True, exist_ok=True)
-    rules_file = rules_dir / "GEMINI.md"
+    rules_file = rules_dir / "PhonixHP.md"
+    _ensure_phonix_hp_rule(repo_root)
     print(f" [PASS] Verified quota preservation rules at {rules_file}")
 
     print("=" * 60)
@@ -194,6 +195,100 @@ def install_agy(repo_root: str = _REPO_ROOT) -> int:
     print(" Antigravity CLI will now automatically route code inspections")
     print(" through the Context MMU to preserve Five Hour & Weekly Limit quotas.")
     print("=" * 60)
+    return 0
+
+
+def attach_workspace(target_dir: str = ".") -> int:
+    """Attaches Phonix v2.0 Quota-Armor to an external codebase.
+
+    1. Injects .agents/rules/PhonixHP.md
+    2. Registers phonix-mmu in target project's .agents/mcp_config.json
+    3. Indexes the target codebase and builds compact AST symbols
+    """
+    target_path = Path(target_dir).resolve()
+    print("=" * 65)
+    print(" Phonix v2.0 - Attach Quota Armor to Target Codebase")
+    print("=" * 65)
+    print(f" [*] Target Workspace: {target_path}")
+
+    if not target_path.is_dir():
+        print(f" [!] Error: Target directory '{target_path}' does not exist.")
+        return 1
+
+    # 1. Inject PhonixHP.md
+    _ensure_phonix_hp_rule(target_path)
+    rules_file = target_path / ".agents" / "rules" / "PhonixHP.md"
+    print(f" [PASS] Injected PhonixHP.md quota rule at {rules_file}")
+
+    # 2. Register phonix-mmu in target's .agents/mcp_config.json
+    agents_dir = target_path / ".agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    mcp_config_path = agents_dir / "mcp_config.json"
+
+    py_executable = sys.executable or "python"
+    phonix_repo_dir = _REPO_ROOT
+
+    config_data: dict[str, Any] = {"mcpServers": {}}
+    if mcp_config_path.is_file():
+        try:
+            with open(mcp_config_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict) and "mcpServers" in loaded:
+                    config_data = loaded
+        except Exception:
+            pass
+
+    config_data.setdefault("mcpServers", {})["phonix-mmu"] = {
+        "command": py_executable,
+        "args": ["-m", "src.mcp_server"],
+        "cwd": phonix_repo_dir,
+        "env": {
+            "PHONIX_WORKSPACE": str(target_path),
+            "PYTHONPATH": phonix_repo_dir,
+        },
+    }
+
+    with open(mcp_config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=2)
+    print(f" [PASS] Registered phonix-mmu MCP server in {mcp_config_path}")
+
+    # Also register in user's global ~/.gemini/config/mcp_config.json
+    try:
+        global_mcp_path = Path.home() / ".gemini" / "config" / "mcp_config.json"
+        global_mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        global_cfg: dict[str, Any] = {"mcpServers": {}}
+        if global_mcp_path.is_file():
+            try:
+                with open(global_mcp_path, "r", encoding="utf-8") as f:
+                    global_cfg = json.load(f)
+            except Exception:
+                pass
+        global_cfg.setdefault("mcpServers", {})["phonix-mmu"] = {
+            "command": py_executable,
+            "args": ["-m", "src.mcp_server"],
+            "cwd": phonix_repo_dir,
+            "env": {
+                "PHONIX_WORKSPACE": str(target_path),
+                "PYTHONPATH": phonix_repo_dir,
+            },
+        }
+        with open(global_mcp_path, "w", encoding="utf-8") as f:
+            json.dump(global_cfg, f, indent=2)
+        print(f" [PASS] Synchronized global MCP configuration at {global_mcp_path}")
+    except Exception as exc:
+        logger.debug("Could not update global config: %s", exc)
+
+    # 3. Index target codebase
+    print(" [*] Indexing target codebase AST frames...")
+    core = GatewayCore(workspace_root=str(target_path), auto_index=True)
+    file_count = core.file_trie.total_files
+    frame_count = len(core._frame_registry)
+    print(f" [PASS] Successfully indexed {file_count} files ({frame_count} AST frames)")
+    print("=" * 65)
+    print(" Codebase successfully equipped with Phonix v2.0 Quota Armor!")
+    print(f" Antigravity agents in '{target_path.name}' will now use phonix-mmu")
+    print(" to save 75%-85% token quota and prevent context limit exhaustion.")
+    print("=" * 65)
     return 0
 
 
@@ -283,6 +378,17 @@ def cli_entrypoint() -> None:
         "--output", default="data/phonix_router_sft_dataset.jsonl", help="Output JSONL path"
     )
 
+    # attach command
+    attach_parser = subparsers.add_parser(
+        "attach", help="Attach PhonixHP quota armor to an external codebase"
+    )
+    attach_parser.add_argument(
+        "target_dir",
+        nargs="?",
+        default=".",
+        help="Target workspace path (default: current directory)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "start":
@@ -297,6 +403,8 @@ def cli_entrypoint() -> None:
         run_mcp_server()
     elif args.command == "build-dataset":
         build_dataset_command(max_commits=args.max_commits, output_path=args.output)
+    elif args.command == "attach":
+        attach_workspace(target_dir=args.target_dir)
     else:
         parser.print_help()
 

@@ -306,8 +306,8 @@ def test_main_install_agy() -> None:
     hooks_path = Path(_REPO_ROOT) / ".agents" / "hooks.json"
     assert hooks_path.is_file()
 
-    # Verify .agents/rules/GEMINI.md
-    rules_path = Path(_REPO_ROOT) / ".agents" / "rules" / "GEMINI.md"
+    # Verify .agents/rules/PhonixHP.md
+    rules_path = Path(_REPO_ROOT) / ".agents" / "rules" / "PhonixHP.md"
     assert rules_path.is_file()
 
 
