@@ -44,6 +44,14 @@ Zero-Trust Threat Interception Rate:
 ```
 
 ### ⚡ What's New in Phonix v2.1
+- **Proprietary G-MMU ($L_0 \to L_3$) Continuous Gravitational Stratification**: Stratified Context Mipmapping that contrasts with Peter Denning's 1968 binary working set:
+  - **$L_0$ Ghost Page Directory** ($d=\infty$): Topological symbol index and line metadata ($< 50$ tokens).
+  - **$L_1$ Sibling Skeletons** ($d=2$): One-line signatures of sibling functions/classes with procedural bodies elided.
+  - **$L_2$ Module Imports & Global Constants** ($d=1$): Top-of-file imports and global invariants (`CODE_EXTENSIONS`, `SENSITIVE_FILE_PATTERNS`, `MALICIOUS_COMMAND_PATTERNS`).
+  - **$L_3$ Fovea Verbatim Working Set** ($d=0$, `[Lines X-Y]`): 100% byte-accurate raw source lines for the focal edit window.
+  - **Attention-Decay Feedback**: Post-surgical edit, the target file transitions from $L_3 \to L_1$ (`[G-MMU L3 -> L1: Committed & Verified]`), shedding method bodies while retaining structural context.
+- **Colon Line-Range Syntax**: Direct line-bounded fovea queries via `<file_path>:<start>-<end>` (e.g. `src/agy_hooks.py:130-294`).
+- **Stateful Circuit Breaker**: Active turn budget protection (> 15 turns), Anti-Polling Lock (blocks consecutive `manage_task` status/list checks $N \ge 2$), and forbidden shell sleep loops (`Start-Sleep`, `while true`, `sleep`).
 - **Multi-Query Data-Slug Locator**: Batch inspect file paths and data array slugs in 1 single call (`phonix_get_pruned_context(query="file.tsx | slug1 | slug2", for_edit=True)`), returning exact verbatim `[Lines X-Y]` edit windows with 100% preserved whitespace.
 - **CRLF-Safe Surgical Multi-Hunk Editor**: `phonix_surgical_edit` eliminates Windows `\r\n` vs `\n` edit mismatch loops by automatically normalizing and applying atomic multi-hunk replacements.
 - **Zero-Touch Multi-Project Auto-Discovery**: Automatically binds to foreign active repositories (`os.getcwd()`), self-injects `PhonixHP.md` Quota Armor, and guarantees zero target repository pollution via centralized vault storage.
@@ -104,6 +112,19 @@ flowchart TD
 - **Git Commit AST Triage Miner**: Mined real repository commits to generate ground-truth AST pruning pairs.
 - **Telemetry Distillation Logger**: Automatically logs live routing and context pruning traces into ChatML SFT format (`data/phonix_router_sft_dataset.jsonl`).
 - **Ollama Modelfile**: Pre-calibrated Modelfile bundling GBNF grammar constraints with 1.2 GB VRAM execution parameters.
+
+### E. Proprietary G-MMU & Stateful Circuit Breaker (`private_moat/`, `src/agy_hooks.py`)
+- **Continuous Gravitational Stratification ($L_0 \to L_3$)**:
+  Unlike Peter Denning's 1968 binary Working Set model ($W(t, \tau)$ where pages are either wholly in RAM or on disk), Phonix's G-MMU introduces 4 deterministic mipmap resolutions:
+  - **$L_0$ Ghost Page Directory** ($d=\infty$): File path, total line count, top-level symbol index. Marked `[G-MMU L3 -> L1: Committed & Verified]` post-edit.
+  - **$L_1$ Sibling Skeletons** ($d=2$): 1-line signatures of sibling functions/classes, preserving type annotations and docstrings while eliding procedural logic.
+  - **$L_2$ Module Imports & Global Constants** ($d=1$): Top-of-file imports and global invariants (`CODE_EXTENSIONS`, `SENSITIVE_FILE_PATTERNS`, `MALICIOUS_COMMAND_PATTERNS`).
+  - **$L_3$ Fovea Verbatim Working Set** ($d=0$, `[Lines X-Y]`): 100% full-fidelity verbatim raw lines for the active edit window.
+- **Colon Line-Range Syntax**: Queries matching `<file_path>:<start>-<end>` (e.g. `src/agy_hooks.py:130-294`) parse line slices directly before disk checks.
+- **Stateful Circuit Breaker**:
+  - **Anti-Polling Lock**: Blocks repeated `manage_task` status/list checks ($N \ge 2$) and shell sleep loops (`Start-Sleep`, `while true`, `sleep`).
+  - **Task Turn Budget**: Enforces a 15-turn ceiling on unattended tool loops, preventing runaway spending.
+  - **Live Gateway Telemetry**: Exposes `circuit_breaker_trips` and `polling_loops_blocked` in `/health` and `/v1/z3/verify`.
 
 ---
 

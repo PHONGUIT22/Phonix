@@ -242,6 +242,7 @@ class GatewayCore:
         "exports",
         "public",
         "coverage",
+        ".cache",
     }
 
     TARGET_EXTENSIONS: set[str] = {
@@ -307,6 +308,8 @@ class GatewayCore:
         self.policy_engine: PolicyEngine = PolicyEngine(config_path=policy_config_path)
         self.micro_router: SLMEngine = SLMEngine(config_path=hardware_config_path)
         self.circuit_breaker: CircuitBreaker = CircuitBreaker()
+        self.circuit_breaker_trips: int = 0
+        self.polling_loops_blocked: int = 0
         self.local_fast_path: LocalFastPath = LocalFastPath(config_path=hardware_config_path)
         self.cloud_dispatcher: CloudDispatcher = CloudDispatcher(config_path=upstreams_config_path)
         self.rehydrator: Rehydrator = Rehydrator()
@@ -862,11 +865,15 @@ def create_gateway_app(workspace_root: str = ".") -> Any:
         metrics["total_requests"] = getattr(core, "total_requests", metrics.get("total_requests", 0))
         metrics["total_tokens_processed"] = getattr(core, "total_tokens_processed", metrics.get("total_tokens_processed", 0))
         metrics["total_tokens_saved"] = getattr(core, "total_tokens_saved", 0)
+        metrics["circuit_breaker_trips"] = getattr(core, "circuit_breaker_trips", 0)
+        metrics["polling_loops_blocked"] = getattr(core, "polling_loops_blocked", 0)
         return {
             "status": "ok",
             "version": "2.0.0",
             "architecture": "Zero-Trust AST Paging & 1B Micro-Router",
             "telemetry": metrics,
+            "circuit_breaker_trips": getattr(core, "circuit_breaker_trips", 0),
+            "polling_loops_blocked": getattr(core, "polling_loops_blocked", 0),
             "indexed_files": core.file_trie.total_files,
             "registered_ast_frames": len(core._frame_registry),
         }
@@ -999,8 +1006,21 @@ def create_gateway_app(workspace_root: str = ".") -> Any:
                 tokens_out=tokens_out,
             )
         )
+        decision = str(payload.get("decision", ""))
+        reason = str(payload.get("reason", ""))
+        if decision == "deny" or payload.get("trip_circuit_breaker") or payload.get("block_polling"):
+            if payload.get("block_polling") or any(k in reason for k in ("Polling", "polling", "sleep")) or any(k in text for k in ("Polling", "polling", "sleep")):
+                core.polling_loops_blocked += 1
+            if payload.get("trip_circuit_breaker") or any(k in reason for k in ("Circuit Breaker", "Turn Budget", "Budget Exceeded")) or any(k in text for k in ("Circuit Breaker", "Turn Budget", "Budget Exceeded")):
+                core.circuit_breaker_trips += 1
+
         logger.info(f"Phonix HTTP Zero-Trust [Verify]: role='{role}', dept='{dept}', tool='{tool_name}'")
-        return {"result": text_output, "verified": True}
+        return {
+            "result": text_output,
+            "verified": True,
+            "circuit_breaker_trips": getattr(core, "circuit_breaker_trips", 0),
+            "polling_loops_blocked": getattr(core, "polling_loops_blocked", 0),
+        }
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: ChatCompletionRequest) -> Any:

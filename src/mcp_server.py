@@ -21,6 +21,17 @@ from src.gateway.proxy_server import GatewayCore, _ensure_phonix_hp_rule
 
 logger = logging.getLogger("phonix.mcp")
 
+STRICT_EXCLUDED_DIRS: set[str] = {
+    "node_modules",
+    ".next",
+    ".git",
+    "dist",
+    "build",
+    "coverage",
+    ".cache",
+    "rawdata",
+}
+
 
 class PhonixMCPServer:
     """Stdio-based JSON-RPC 2.0 Model Context Protocol Server."""
@@ -52,6 +63,7 @@ class PhonixMCPServer:
         self._workspace_cores: dict[str, GatewayCore] = {
             os.path.abspath(self.workspace_root): self.core
         }
+        self._committed_fovea_files: set[str] = set()
 
     def _try_http_gateway(self, endpoint: str, payload: dict[str, Any]) -> str | None:
         """Attempts to forward tool call to live Phonix HTTP Gateway daemon (http://127.0.0.1:8000)."""
@@ -167,7 +179,9 @@ class PhonixMCPServer:
                         for root, dirs, files in os.walk(search_dir):
                             dirs[:] = [
                                 d for d in dirs
-                                if d not in GatewayCore.IGNORED_DIRS and not d.startswith(".")
+                                if d not in GatewayCore.IGNORED_DIRS
+                                and d not in STRICT_EXCLUDED_DIRS
+                                and not d.startswith(".")
                             ]
                             for fname in files:
                                 fname_lower = fname.lower()
@@ -387,6 +401,34 @@ class PhonixMCPServer:
             f"{map_text}"
         )
 
+    def _format_window_with_gmmu(
+        self,
+        rel_path: str,
+        snippet: str,
+        all_content: str,
+        line_range: tuple[int, int] | None = None,
+    ) -> str:
+        """Renders a verbatim window using proprietary G-MMU (L0 -> L3) if available, or standard verbatim."""
+        norm_path = rel_path.replace("\\", "/")
+        is_committed = (
+            norm_path in self._committed_fovea_files
+            or Path(norm_path).name in self._committed_fovea_files
+        )
+        try:
+            from private_moat.foveated_ast_compactor import render_gmmu_stratified_bundle
+
+            return render_gmmu_stratified_bundle(
+                file_path=norm_path,
+                target_snippet_or_lines=snippet,
+                all_file_content=all_content,
+                line_range=line_range,
+                committed=is_committed,
+            )
+        except ImportError:
+            s_line = line_range[0] if line_range else 1
+            e_line = line_range[1] if line_range else len(all_content.splitlines())
+            return f"=== Verbatim Edit Window: {norm_path} [Lines {s_line}-{e_line}] ===\n{snippet}"
+
     def _extract_verbatim_windows(
         self,
         core: GatewayCore,
@@ -406,7 +448,12 @@ class PhonixMCPServer:
         candidate_files: list[Path] = []
         for sdir in scan_dirs:
             for root, dirs, files in os.walk(sdir):
-                dirs[:] = [d for d in dirs if d not in GatewayCore.IGNORED_DIRS and not d.startswith(".")]
+                dirs[:] = [
+                    d for d in dirs
+                    if d not in GatewayCore.IGNORED_DIRS
+                    and d not in STRICT_EXCLUDED_DIRS
+                    and not d.startswith(".")
+                ]
                 for f in files:
                     if f.endswith((".ts", ".tsx", ".js", ".jsx", ".json", ".py", ".html", ".css", ".md")):
                         candidate_files.append(Path(root) / f)
@@ -415,6 +462,64 @@ class PhonixMCPServer:
             sub_q = raw_q.strip()
             if not sub_q:
                 continue
+
+            # 1. Colon Line-Range Syntax: <file_path>:<start>-<end>
+            colon_match = re.match(r"^(.+?):(\d+)-(\d+)$", sub_q)
+            if colon_match:
+                colon_file_part = colon_match.group(1).replace("\\", "/").strip("'\"")
+                start_l = int(colon_match.group(2))
+                end_l = int(colon_match.group(3))
+                s_idx = min(start_l, end_l)
+                e_idx = max(start_l, end_l)
+
+                colon_target: Path | None = None
+                if (ws_path / colon_file_part).is_file():
+                    colon_target = ws_path / colon_file_part
+                elif Path(colon_file_part).is_file():
+                    colon_target = Path(colon_file_part)
+                else:
+                    target_name = Path(colon_file_part).name.lower()
+                    for cand in candidate_files:
+                        if cand.name.lower() == target_name:
+                            colon_target = cand
+                            break
+
+                if colon_target is None:
+                    try:
+                        for cand in ws_path.rglob(f"*{Path(colon_file_part).name}"):
+                            if (
+                                not any(p in cand.parts for p in GatewayCore.IGNORED_DIRS)
+                                and not any(p in cand.parts for p in STRICT_EXCLUDED_DIRS)
+                            ):
+                                colon_target = cand
+                                break
+                    except Exception:
+                        pass
+
+                if colon_target is not None:
+                    try:
+                        rel_path = str(colon_target.relative_to(ws_path)).replace("\\", "/")
+                    except ValueError:
+                        rel_path = colon_file_part
+                    content = colon_target.read_text(encoding="utf-8", errors="ignore")
+                    all_lines = content.splitlines()
+                    total_lines = len(all_lines)
+                    s_idx = max(1, s_idx)
+                    e_idx = min(total_lines, e_idx)
+                    region = (rel_path, s_idx, e_idx)
+                    if region not in seen_regions:
+                        seen_regions.add(region)
+                        slice_lines = all_lines[s_idx - 1 : e_idx]
+                        slice_text = "\n".join(slice_lines)
+                        windows.append(
+                            self._format_window_with_gmmu(
+                                rel_path=rel_path,
+                                snippet=slice_text,
+                                all_content=content,
+                                line_range=(s_idx, e_idx),
+                            )
+                        )
+                    continue
 
             clean_q = sub_q.replace("\\", "/").strip("'\"")
 
@@ -439,7 +544,12 @@ class PhonixMCPServer:
                     if region not in seen_regions:
                         seen_regions.add(region)
                         windows.append(
-                            f"=== Verbatim Edit Window: {rel_path} [Lines 1-{total_lines}] ===\n{content}"
+                            self._format_window_with_gmmu(
+                                rel_path=rel_path,
+                                snippet=content,
+                                all_content=content,
+                                line_range=(1, total_lines),
+                            )
                         )
                     continue
                 else:
@@ -448,7 +558,12 @@ class PhonixMCPServer:
                     if region not in seen_regions:
                         seen_regions.add(region)
                         windows.append(
-                            f"=== Verbatim Edit Window: {rel_path} [Lines 1-50] ({total_lines} total lines) ===\n{top_lines}"
+                            self._format_window_with_gmmu(
+                                rel_path=rel_path,
+                                snippet=top_lines,
+                                all_content=content,
+                                line_range=(1, 50),
+                            )
                         )
                     continue
 
@@ -492,7 +607,12 @@ class PhonixMCPServer:
                             seen_regions.add(h_region)
                             h_content = "\n".join(lines[obj_start:header_end])
                             windows.append(
-                                f"=== Verbatim Edit Window: {rel_path} [Lines {h_start_num}-{h_end_num}] ===\n{h_content}"
+                                self._format_window_with_gmmu(
+                                    rel_path=rel_path,
+                                    snippet=h_content,
+                                    all_content=cand_text,
+                                    line_range=(h_start_num, h_end_num),
+                                )
                             )
 
                         # 2. Closing / FAQ window
@@ -520,7 +640,12 @@ class PhonixMCPServer:
                                     seen_regions.add(f_region)
                                     f_content = "\n".join(lines[faq_start:faq_end])
                                     windows.append(
-                                        f"=== Verbatim Edit Window: {rel_path} [Lines {f_start_num}-{f_end_num}] ===\n{f_content}"
+                                        self._format_window_with_gmmu(
+                                            rel_path=rel_path,
+                                            snippet=f_content,
+                                            all_content=cand_text,
+                                            line_range=(f_start_num, f_end_num),
+                                        )
                                     )
                         break
                     else:
@@ -532,7 +657,12 @@ class PhonixMCPServer:
                             seen_regions.add(w_region)
                             w_content = "\n".join(lines[w_start:w_end])
                             windows.append(
-                                f"=== Verbatim Edit Window: {rel_path} [Lines {w_start + 1}-{w_end}] ===\n{w_content}"
+                                self._format_window_with_gmmu(
+                                    rel_path=rel_path,
+                                    snippet=w_content,
+                                    all_content=cand_text,
+                                    line_range=(w_start + 1, w_end),
+                                )
                             )
                         break
         return windows
@@ -563,7 +693,7 @@ class PhonixMCPServer:
         sub_queries = [q.strip() for q in query.split("|") if q.strip()]
 
         # Fast exact pattern / slug / file window extraction when for_edit is requested or multi-query
-        if for_edit or len(sub_queries) > 1 or any("-" in q or "/" in q for q in sub_queries):
+        if for_edit or len(sub_queries) > 1 or any("-" in q or "/" in q or ":" in q for q in sub_queries):
             windows = self._extract_verbatim_windows(core, sub_queries, max_tokens=max_tokens)
             if windows:
                 return (
@@ -769,6 +899,8 @@ class PhonixMCPServer:
             },
         )
         if remote is not None:
+            self._committed_fovea_files.add(file_path.replace("\\", "/"))
+            self._committed_fovea_files.add(Path(file_path).name)
             return remote
 
         core = self._resolve_active_core(query=file_path, explicit_workspace=workspace_root)
@@ -781,7 +913,10 @@ class PhonixMCPServer:
             # Fallback search in workspace
             matches = [
                 cand for cand in ws_path.rglob(f"*{Path(file_path).name}")
-                if not any(part in cand.parts for part in GatewayCore.IGNORED_DIRS)
+                if (
+                    not any(part in cand.parts for part in GatewayCore.IGNORED_DIRS)
+                    and not any(part in cand.parts for part in STRICT_EXCLUDED_DIRS)
+                )
             ]
             if matches:
                 target = matches[0]
@@ -826,9 +961,12 @@ class PhonixMCPServer:
         # Atomic write back
         target.write_bytes(content.encode("utf-8"))
 
-        # Re-index target file in GatewayCore
+        # Re-index target file in GatewayCore and record committed fovea
         try:
             rel_str = str(target.relative_to(ws_path)).replace("\\", "/")
+            self._committed_fovea_files.add(rel_str)
+            self._committed_fovea_files.add(target.name)
+            self._committed_fovea_files.add(file_path.replace("\\", "/"))
             frames = core.ast_slicer.slice_file(str(target))
             core._file_to_frames[rel_str] = frames
             for f in frames:

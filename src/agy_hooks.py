@@ -8,11 +8,13 @@ Provides deterministic runtime guardrails for coding agents:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import sys
+import time
 from typing import Any
 
 # Sensitive file patterns for read_file / view_file
@@ -119,8 +121,44 @@ def _notify_gateway(tool_name: str, args: dict[str, Any], decision: str, reason:
         pass
 
 
+def _get_circuit_state_path() -> Path:
+    env_p = os.environ.get("PHONIX_CIRCUIT_STATE_PATH")
+    if env_p:
+        return Path(env_p)
+    return Path.home() / ".gemini" / "phonix_circuit_state.json"
+
+
+def _load_circuit_state() -> dict[str, Any]:
+    path = _get_circuit_state_path()
+    if path.is_file():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {
+        "turn_count": 0,
+        "last_call_timestamp": 0.0,
+        "last_tool_name": "",
+        "last_tool_args_hash": "",
+        "consecutive_same_tool_count": 0,
+    }
+
+
+def _save_circuit_state(state: dict[str, Any]) -> None:
+    path = _get_circuit_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+
+
 def handle_pre_tool_use() -> int:
-    """Evaluates tool invocation against Zero-Trust policies.
+    """Evaluates tool invocation against Zero-Trust policies and stateful Circuit Breaker.
 
     Reads JSON on stdin:
     {
@@ -151,6 +189,73 @@ def handle_pre_tool_use() -> int:
     tool_call = data.get("toolCall", {})
     tool_name = tool_call.get("name", "")
     args = tool_call.get("args", {})
+
+    # Stateful Circuit Breaker Tracking
+    state = _load_circuit_state()
+    now = time.time()
+    last_call_ts = float(state.get("last_call_timestamp", 0.0))
+    turn_count = int(state.get("turn_count", 0))
+    consecutive_count = int(state.get("consecutive_same_tool_count", 0))
+    last_tool = str(state.get("last_tool_name", ""))
+
+    current_args_hash = hashlib.sha256(json.dumps(args, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+    if (now - last_call_ts) > 45.0:
+        turn_count = 1
+        consecutive_count = 1
+    else:
+        turn_count += 1
+        if tool_name == last_tool:
+            consecutive_count += 1
+        else:
+            consecutive_count = 1
+
+    updated_state = {
+        "turn_count": turn_count,
+        "last_call_timestamp": now,
+        "last_tool_name": tool_name,
+        "last_tool_args_hash": current_args_hash,
+        "consecutive_same_tool_count": consecutive_count,
+    }
+    _save_circuit_state(updated_state)
+
+    # Rule 1 (Anti-Polling Lock)
+    if (
+        tool_name in ("ManageTask", "manage_task")
+        and (args.get("Action") in ("status", "list") or args.get("action") in ("status", "list"))
+        and consecutive_count >= 2
+    ):
+        response = {
+            "decision": "deny",
+            "reason": "[Phonix Circuit Breaker] Anti-Polling Lock Tripped! Consecutive ManageTask polling is blocked.",
+        }
+        _notify_gateway(tool_name, args, "deny", response["reason"])
+        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()
+        return 0
+
+    if tool_name in ("run_command", "Bash", "bash", "execute_command"):
+        cmd = args.get("CommandLine") or args.get("command") or args.get("cmd") or ""
+        if re.search(r"(?i)(?:Start-Sleep|while\s+true|\bsleep\s+\d+)", cmd):
+            response = {
+                "decision": "deny",
+                "reason": "[Phonix Circuit Breaker] Shell sleep loops are strictly forbidden.",
+            }
+            _notify_gateway(tool_name, args, "deny", response["reason"])
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+            return 0
+
+    # Rule 2 (Turn Budget Circuit Breaker)
+    if turn_count > 15:
+        response = {
+            "decision": "deny",
+            "reason": "[Phonix Circuit Breaker Tripped] Task Turn Budget Exceeded (15 consecutive tool turns)! Summarize and report to user.",
+        }
+        _notify_gateway(tool_name, args, "deny", response["reason"])
+        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()
+        return 0
 
     # Rule 1: Guard sensitive credential files against read_file / view_file
     if tool_name in ("read_file", "view_file", "read_file_lines"):

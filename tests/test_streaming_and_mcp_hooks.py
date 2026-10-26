@@ -422,12 +422,16 @@ def test_http_mmu_and_z3_endpoints() -> None:
     )
     assert z3_res.get("verified") is True
     assert "result" in z3_res
+    assert "circuit_breaker_trips" in z3_res
+    assert "polling_loops_blocked" in z3_res
 
     # 5. Verify /health and app.state.core telemetry increments
     health_after = run_coro(routes["/health"]())
     after_reqs = health_after["telemetry"].get("total_requests", 0)
     assert after_reqs >= initial_reqs + 3
     assert getattr(app.state.core, "total_requests", 0) >= initial_reqs + 3
+    assert "circuit_breaker_trips" in health_after
+    assert "polling_loops_blocked" in health_after
 
 
 def test_v21_multi_query_and_surgical_edit(tmp_path: Path) -> None:
@@ -550,5 +554,135 @@ def test_benchmark_suite_runs() -> None:
 
     assert Path("data/benchmark_results.json").is_file()
     assert Path("docs/BENCHMARK_REPORT.md").is_file()
+
+
+def test_colon_line_range_syntax_and_gmmu(tmp_path: Path) -> None:
+    """Verifies colon line-range syntax parsing (<file>:<start>-<end>) and G-MMU L0-L3 output."""
+    from src.mcp_server import PhonixMCPServer
+
+    sample_code = (
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n\n"
+        "MAX_CONCURRENT_TASKS = 10\n"
+        "DEFAULT_TIMEOUT_SECS = 45\n\n"
+        "def top_worker():\n"
+        "    \"\"\"Top worker function.\"\"\"\n"
+        "    return 42\n\n"
+        "def target_function():\n"
+        "    # Line 12\n"
+        "    val = top_worker()\n"
+        "    return val * 2\n\n"
+        "def bottom_sibling():\n"
+        "    \"\"\"Sibling worker function.\"\"\"\n"
+        "    return 'ok'\n"
+    )
+
+    test_file = tmp_path / "module_alpha.py"
+    test_file.write_text(sample_code, encoding="utf-8")
+
+    server = PhonixMCPServer(workspace_root=str(tmp_path))
+
+    # 1. Query with colon syntax: module_alpha.py:10-16
+    res = server._tool_get_pruned_context(
+        query="module_alpha.py:10-16",
+        for_edit=True,
+        workspace_root=str(tmp_path),
+    )
+
+    # Verify G-MMU L0-L3 layers are all present
+    assert "=== [G-MMU L0: Ghost Page Directory] ===" in res
+    assert "module_alpha.py" in res
+    assert "top_worker" in res
+
+    assert "=== [G-MMU L1: Sibling Skeletons (Gravity d=2)] ===" in res
+    assert "def top_worker" in res or "def bottom_sibling" in res
+
+    assert "=== [G-MMU L2: Module Imports & Global Constants (Gravity d=1)] ===" in res
+    assert "import os" in res or "MAX_CONCURRENT_TASKS" in res
+
+    assert "=== [G-MMU L3: Fovea Verbatim Working Set (Gravity d=0) [Lines 10-16]] ===" in res
+    assert "=== Verbatim Edit Window: module_alpha.py [Lines 10-16] ===" in res
+    assert "def target_function():" in res
+
+    # 2. Apply surgical edit and verify G-MMU L3 -> L1 attention decay banner
+    server._tool_surgical_edit(
+        file_path=str(test_file),
+        edits=[{"target": "val * 2", "replacement": "val * 3"}],
+        workspace_root=str(tmp_path),
+    )
+
+    # Re-query the edited file - should now show committed banner in L0
+    res_after = server._tool_get_pruned_context(
+        query="module_alpha.py:10-16",
+        for_edit=True,
+        workspace_root=str(tmp_path),
+    )
+    assert "[G-MMU L3 -> L1: Committed & Verified]" in res_after
+    assert "val * 3" in res_after
+
+
+def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatch: Any) -> None:
+    """Verifies stateful Circuit Breaker anti-polling lock and turn budget tripping."""
+    import io
+    from src.agy_hooks import handle_pre_tool_use
+
+    circuit_file = tmp_path / "phonix_circuit_state.json"
+    monkeypatch.setenv("PHONIX_CIRCUIT_STATE_PATH", str(circuit_file))
+
+    def invoke(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        old_stdin = sys.stdin
+        old_stdout = sys.stdout
+        try:
+            sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": tool_name, "args": args}}))
+            out_buf = io.StringIO()
+            sys.stdout = out_buf
+            handle_pre_tool_use()
+            return json.loads(out_buf.getvalue())
+        finally:
+            sys.stdin = old_stdin
+            sys.stdout = old_stdout
+
+    # 1. First ManageTask call is allowed
+    r1 = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
+    assert r1["decision"] == "allow"
+
+    # 2. Consecutive ManageTask polling call is blocked by Anti-Polling Lock
+    r2 = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
+    assert r2["decision"] == "deny"
+    assert "Anti-Polling Lock Tripped" in r2["reason"]
+
+    # Also verify manage_task lowercase alias with action='list'
+    r_other = invoke("other_tool", {"dummy": 1})
+    assert r_other["decision"] == "allow"
+    r_list1 = invoke("manage_task", {"Action": "list"})
+    assert r_list1["decision"] == "allow"
+    r_list2 = invoke("manage_task", {"Action": "list"})
+    assert r_list2["decision"] == "deny"
+    assert "Anti-Polling Lock Tripped" in r_list2["reason"]
+
+    # 3. Shell sleep loop is strictly forbidden
+    r_sleep1 = invoke("run_command", {"CommandLine": "Start-Sleep -Seconds 5"})
+    assert r_sleep1["decision"] == "deny"
+    assert "Shell sleep loops are strictly forbidden" in r_sleep1["reason"]
+
+    r_sleep2 = invoke("Bash", {"command": "while true; do sleep 2; done"})
+    assert r_sleep2["decision"] == "deny"
+    assert "Shell sleep loops are strictly forbidden" in r_sleep2["reason"]
+
+    # 4. Turn Budget Circuit Breaker (> 15 consecutive turns)
+    # Write a state with turn_count = 15
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        c_state = json.load(f)
+    c_state["turn_count"] = 15
+    c_state["last_tool_name"] = "unrelated"
+    with open(circuit_file, "w", encoding="utf-8") as f:
+        json.dump(c_state, f)
+
+    # Next tool call increments turn_count to 16 (> 15) and trips the budget breaker
+    r_turn16 = invoke("unrelated_tool", {"action": "compute"})
+    assert r_turn16["decision"] == "deny"
+    assert "Task Turn Budget Exceeded (15 consecutive tool turns)" in r_turn16["reason"]
+
 
 

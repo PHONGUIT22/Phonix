@@ -139,6 +139,36 @@ For intent routing and semantic triage, Phonix deploys a quantized 1.5B SLM (Qwe
 - **VRAM Constraint**: Strictly locked to **1.2 GB VRAM** (model footprint: 986 MB).
 - **GBNF Grammar Locking**: Enforces context-free grammar constraints (`router_decision.gbnf`) at the decoding layer. The SLM cannot generate conversational chatter; it deterministically emits JSON specifying `selected_ast_frames`, `dropped_ast_frames`, `complexity_score`, and `requires_cloud_handoff`.
 
+### 2.6 Proprietary G-MMU: Continuous Gravitational Stratification ($L_0 \to L_3$) vs. Denning's 1968 Working Set
+In 1968, Peter J. Denning established the foundation of virtual memory management with the **Working Set Model of Program Behavior**, defining a process's working set $W(t, \tau)$ as the set of memory pages referenced during the process-time interval $(t-\tau, t)$. In operating system architecture, this formulation is strictly **binary**: a virtual page is either physically mapped into fast Random Access Memory (RAM) or paged out to secondary persistent storage (disk).
+
+When applied to autonomous LLM agent execution, binary page caching fails under two distinct constraints:
+1. **The Attention Degradation Barrier ("Lost-in-the-Middle")**: Loading complete source code files or large binary page chunks saturates the transformer self-attention matrix with procedural boilerplate ($O(N^2)$ attention compute), degrading reasoning quality on target lines.
+2. **Economic Loop Inflation**: Loading raw binary pages repeatedly inflates context transcripts by hundreds of thousands of tokens per turn ($T_{\text{cum}} = \sum_{k=1}^M (H_0 + k \Delta)$).
+
+To resolve this, Phonix introduces **G-MMU (Gravitational & Multi-Resolution Context MMU)**, replacing binary RAM/disk paging with **continuous gravitational stratification** across four deterministic Mipmap Resolution Levels ($L_0 \to L_3$):
+
+```mermaid
+flowchart TD
+    subgraph GMMU["G-MMU Stratified Mipmap Hierarchy"]
+        L0["L0: Ghost Page Directory (Gravity d=∞)\n• Top-level symbol index, total lines, path\n• Footprint: < 50 tokens\n• State: [Committed & Verified] on edit completion"]
+        L1["L1: Sibling Skeletons (Gravity d=2)\n• 1-line signatures of sibling functions/classes\n• Docstrings preserved, procedural bodies elided\n• Footprint: 100 - 200 tokens"]
+        L2["L2: Module Imports & Global Constants (Gravity d=1)\n• Top-of-file imports & package declarations\n• Global invariants: CODE_EXTENSIONS, constants\n• Footprint: 100 - 250 tokens"]
+        L3["L3: Fovea Verbatim Working Set (Gravity d=0)\n• 100% byte-accurate verbatim target window [Lines X-Y]\n• Whitespace and indentations perfectly preserved\n• Zero hallucination, CRLF-safe editing target"]
+    end
+    
+    L3 -->|After Successful Surgical Edit| L0
+    L0 -->|Attention Decay Transition| L1
+```
+
+- **Level $L_0$: Ghost Page Directory (Gravity $d=\infty$)**: Contains the global topological map of the file: absolute/relative path, total line count, and an array of all top-level symbols (functions, classes, interfaces). It consumes $< 50$ tokens. When a hunk is committed via `phonix_surgical_edit`, $L_0$ dynamically flags `[G-MMU L3 -> L1: Committed & Verified]`.
+- **Level $L_1$: Sibling Skeletons (Gravity $d=2$)**: Structural peripheral frames. Captures 1-line AST signatures and docstrings of sibling classes and methods, eliding procedural loops while maintaining full type annotations and contract bounds ($100-200$ tokens).
+- **Level $L_2$: Module Imports & Global Constants (Gravity $d=1$)**: Captures upstream dependencies (`import`, `from`, `require`) and module-level constants and invariants (`CODE_EXTENSIONS`, `SENSITIVE_FILE_PATTERNS`, `MALICIOUS_COMMAND_PATTERNS`). This prevents hallucination of non-existent imports or conflicting variable definitions ($100-250$ tokens).
+- **Level $L_3$: Fovea Verbatim Working Set (Gravity $d=0$, $[Lines\ X-Y]$)**: 100% full-fidelity raw source code for the focal editing target, bounded by exact line numbers. Line numbers and byte content match disk storage with 100% mathematical precision.
+
+#### Dynamic Attention-Decay and Page Invalidation
+Under Denning's model, a page remains in $W(t, \tau)$ until evicted by an LRU timer. Under G-MMU, pages undergo **Attention-Decay Feedback**: once an agent executes an atomic replacement via `_tool_surgical_edit`, the target file is marked as committed (`self._committed_fovea_files`). Subsequent turns compress the previous focal hunk from full-fidelity $L_3$ down to $L_1$ with an active verification flag. This allows multi-turn agents to complete multi-file refactoring without context explosion.
+
 ---
 
 ## 3. Empirical Evaluation & Benchmark Results
@@ -308,6 +338,22 @@ When the Hard-Block gate and Proof-of-Execution governance were activated:
 - Conversational loop inflation plummeted from **2.66M tokens to 22.5k tokens** (**-99.16%**).
 - First-try edit success reached **100.0%**.
 
+### 4.4 Case Study: Autonomous Polling Traps, Shell Sleep Loops, and Stateful Circuit Breakers
+Beyond sliding-window context evasion, autonomous coding agents frequently succumb to **Degenerate Polling Traps**:
+1. **ManageTask Polling**: When asynchronous tasks or commands run in the background, autonomous agents frequently enter polling loops calling `manage_task(Action="status")` or `manage_task(Action="list")` continuously, wasting turn budget and API credits in non-productive churn.
+2. **Shell Sleep Loops**: When instructed to wait for processes, models frequently attempt shell sleep scripts (`Start-Sleep -Seconds 5`, `while true; do sleep 1; done`, `sleep 10`), locking terminal sessions and evading event-driven system notifications.
+3. **Runaway Tool Loops**: Agents entering unproductive reasoning paths can generate 20+ iterative tool invocations without human alignment, exhausting developer quotas.
+
+#### The Phonix Stateful Circuit Breaker Architecture
+To mitigate these pathologies, Phonix activates an on-device stateful Circuit Breaker in `src/agy_hooks.py` with cross-turn persistence (`phonix_circuit_state.json`):
+- **Anti-Polling Lock**: Tracks consecutive invocations of `ManageTask` / `manage_task`. If consecutive calls with `Action in ("status", "list")` reach $N \ge 2$, the breaker trips instantly with a hard deny:
+  `[Phonix Circuit Breaker] Anti-Polling Lock Tripped! Consecutive ManageTask polling is blocked.`
+  Similarly, shell commands matching sleep patterns (`(?i)(?:Start-Sleep|while\s+true|\bsleep\s+\d+)`) are unconditionally blocked.
+- **Task Turn Budget Circuit Breaker**: Tracks consecutive tool turns within an active session (resetting if idle $> 45\text{s}$). If `turn_count > 15`, the breaker trips:
+  `[Phonix Circuit Breaker Tripped] Task Turn Budget Exceeded (15 consecutive tool turns)! Summarize and report to user.`
+  This halts runaway spending and requires human-in-the-loop alignment before further quota can be consumed.
+- **Hardware Gateway Telemetry**: Every circuit breaker trip and blocked polling loop is emitted to `GatewayCore` telemetry and exposed live via `GET /health` (`circuit_breaker_trips`, `polling_loops_blocked`) and `POST /v1/z3/verify`.
+
 ---
 
 ## 5. Comparative Analysis with Prior Art
@@ -352,3 +398,4 @@ Phonix v2.1 is available as an open-core project under the Apache 2.0 license:
 5. Qwen Team. (2024). *Qwen2.5-Coder: Code Language Models Designed for Software Engineering*. Alibaba Group.
 6. Liu, N. F., et al. (2024). *Lost in the Middle: How Language Models Use Long Contexts*. Transactions of the Association for Computational Linguistics, 12, 157-173.
 7. Bostrom, N. (2014). *Superintelligence: Paths, Dangers, Strategies* (Instrumental Convergence & Subgoal Optimization). Oxford University Press.
+8. Denning, P. J. (1968). *The Working Set Model for Program Behavior*. Communications of the ACM, 11(5), 323–333.
