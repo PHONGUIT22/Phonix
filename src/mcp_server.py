@@ -27,21 +27,53 @@ class PhonixMCPServer:
 
     PROTOCOL_VERSION = "2024-11-05"
 
-    def __init__(self, workspace_root: str | None = None) -> None:
-        if workspace_root is None:
-            env_root = os.environ.get("PHONIX_WORKSPACE")
-            if env_root and os.path.isdir(env_root):
-                workspace_root = env_root
-            elif os.getcwd() and os.path.isdir(os.getcwd()):
-                workspace_root = os.getcwd()
-            else:
-                workspace_root = str(Path(__file__).resolve().parent.parent)
-        self.workspace_root = str(Path(workspace_root).resolve())
-        _ensure_phonix_hp_rule(self.workspace_root)
-        self.core = GatewayCore(workspace_root=self.workspace_root, auto_index=True)
+    def __init__(
+        self,
+        workspace_root: str | None = None,
+        core: GatewayCore | None = None,
+        in_http_daemon: bool = False,
+    ) -> None:
+        self._in_http_daemon = in_http_daemon
+        if core is not None:
+            self.core = core
+            self.workspace_root = str(Path(core.workspace_root).resolve())
+        else:
+            if workspace_root is None:
+                env_root = os.environ.get("PHONIX_WORKSPACE")
+                if env_root and os.path.isdir(env_root):
+                    workspace_root = env_root
+                elif os.getcwd() and os.path.isdir(os.getcwd()):
+                    workspace_root = os.getcwd()
+                else:
+                    workspace_root = str(Path(__file__).resolve().parent.parent)
+            self.workspace_root = str(Path(workspace_root).resolve())
+            _ensure_phonix_hp_rule(self.workspace_root)
+            self.core = GatewayCore(workspace_root=self.workspace_root, auto_index=True)
         self._workspace_cores: dict[str, GatewayCore] = {
             os.path.abspath(self.workspace_root): self.core
         }
+
+    def _try_http_gateway(self, endpoint: str, payload: dict[str, Any]) -> str | None:
+        """Attempts to forward tool call to live Phonix HTTP Gateway daemon (http://127.0.0.1:8000)."""
+        if self._in_http_daemon:
+            return None
+        gw_url = os.environ.get("PHONIX_GATEWAY_URL", "http://127.0.0.1:8000").rstrip("/")
+        try:
+            import httpx
+
+            with httpx.Client(timeout=2.5) as client:
+                resp = client.post(f"{gw_url}{endpoint}", json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, dict) and "result" in data:
+                        return str(data["result"])
+        except Exception as exc:
+            logger.debug(
+                "Phonix HTTP Gateway at %s unavailable (%s). Falling back to local MMU.",
+                endpoint,
+                exc,
+            )
+        return None
 
     def _get_or_create_core(self, ws_path: str) -> GatewayCore:
         norm = os.path.abspath(ws_path)
@@ -255,6 +287,248 @@ class PhonixMCPServer:
             }
         return None
 
+    def _tool_repo_map(
+        self,
+        path_prefix: str = "",
+        max_tokens: int = 256,
+        workspace_root: str | None = None,
+    ) -> str:
+        """Executes repository symbol map generation with optional HTTP daemon delegation."""
+        remote = self._try_http_gateway(
+            "/v1/mmu/repo-map",
+            {
+                "path_prefix": path_prefix,
+                "max_tokens": max_tokens,
+                "workspace_root": workspace_root or os.environ.get("PHONIX_WORKSPACE") or os.getcwd(),
+            },
+        )
+        if remote is not None:
+            return remote
+
+        core = self._resolve_active_core(query=path_prefix, explicit_workspace=workspace_root)
+        cached = core.kv_prefix_cache.get_prefix("repo_symbol_map")
+        raw_map = cached.text if cached else ""
+
+        if path_prefix and raw_map:
+            filtered_lines = [
+                line for line in raw_map.splitlines()
+                if line.startswith(path_prefix) or path_prefix in line
+            ]
+            map_text = "\n".join(filtered_lines) if filtered_lines else f"# No files matched prefix '{path_prefix}'"
+        else:
+            map_text = raw_map or "# Repository symbol map is empty."
+
+        return (
+            f"=== Phonix Context MMU Repository Symbol Map ===\n"
+            f"Indexed Files: {core.file_trie.total_files} | Registered Frames: {len(core._frame_registry)}\n"
+            f"Tip: Call 'phonix_get_pruned_context' for specific functions or classes to save token quota.\n\n"
+            f"{map_text}"
+        )
+
+    def _tool_get_pruned_context(
+        self,
+        query: str = "",
+        max_tokens: int = 1536,
+        workspace_root: str | None = None,
+        target_files: list[str] | None = None,
+    ) -> str:
+        """Retrieves deterministic AST frames with dynamic multi-repo resolution and HTTP delegation."""
+        remote = self._try_http_gateway(
+            "/v1/mmu/prune",
+            {
+                "query": query,
+                "max_tokens": max_tokens,
+                "workspace_root": workspace_root or os.environ.get("PHONIX_WORKSPACE") or os.getcwd(),
+                "target_files": target_files or [],
+            },
+        )
+        if remote is not None:
+            return remote
+
+        core = self._resolve_active_core(query=query, explicit_workspace=workspace_root)
+
+        # Step A: Speculative Trie matching for file paths
+        core.speculative_inspector.reset_stream()
+        inspection = core.speculative_inspector.process_chunk(query)
+
+        candidate_files = list(inspection.candidate_files)
+        for arg_file in (target_files or []):
+            if arg_file not in candidate_files:
+                candidate_files.append(arg_file)
+
+        # Step B: Gather candidate frames from matched files AND symbol/keyword search
+        frames = []
+        seen_ids: set[str] = set()
+        for file_path in candidate_files:
+            f_list = core._file_to_frames.get(file_path, [])
+            if not f_list:
+                f_list = core.ast_slicer.slice_file(file_path)
+            for f in f_list:
+                if f.frame_id not in seen_ids:
+                    frames.append(f)
+                    seen_ids.add(f.frame_id)
+
+        # Also match file paths, stems, and symbols across the workspace
+        query_lower = query.lower()
+        tokens = set(re.findall(r"[a-zA-Z0-9_\-]+", query_lower))
+
+        for fpath, flist in core._file_to_frames.items():
+            fpath_lower = fpath.lower()
+            stem_lower = Path(fpath).stem.lower()
+            base_lower = Path(fpath).name.lower()
+            if (
+                stem_lower in tokens
+                or base_lower in tokens
+                or (len(query_lower) >= 4 and query_lower in fpath_lower)
+                or any(t in stem_lower for t in tokens if len(t) >= 4)
+            ):
+                for f in flist:
+                    if f.frame_id not in seen_ids:
+                        frames.append(f)
+                        seen_ids.add(f.frame_id)
+
+        for f in core._frame_registry.values():
+            if f.frame_id in seen_ids:
+                continue
+            sym_lower = (f.symbol_name or "").lower()
+            fpath_lower = (f.file_path or "").lower()
+            if (
+                (sym_lower and len(sym_lower) >= 3 and (sym_lower in query_lower or sym_lower in tokens))
+                or (fpath_lower and (fpath_lower in query_lower or query_lower in fpath_lower))
+                or any(t in sym_lower for t in tokens if len(t) >= 4)
+            ):
+                frames.append(f)
+                seen_ids.add(f.frame_id)
+
+        # If still empty, run smart Micro-Router relevance scoring across all indexed frames
+        if not frames and core._frame_registry:
+            all_frames = list(core._frame_registry.values())
+            router_res = core.micro_router.route_and_prune(
+                user_prompt=query, candidate_frames=all_frames
+            )
+            sel_set = set(router_res.selected_ast_frames)
+            frames = [f for f in all_frames if f.frame_id in sel_set]
+
+        # Step C: Call-graph BFS expansion (1-hop / 2-hop)
+        seed_symbols = [f.symbol_name for f in frames[:5]]
+        if seed_symbols:
+            paged_frames = core.call_graph_pager.page_graph(
+                seed_symbols, max_hops=2, max_token_budget=max_tokens
+            )
+            paged_ids = {f.frame_id for f in paged_frames}
+            for f in frames:
+                if f.frame_id not in paged_ids:
+                    paged_frames.append(f)
+                    paged_ids.add(f.frame_id)
+        else:
+            paged_frames = frames[:6]
+
+        # Step D: Micro-Router GBNF Pruning + MMU Eviction
+        if paged_frames:
+            router_decision = core.micro_router.route_and_prune(
+                user_prompt=query, candidate_frames=paged_frames
+            )
+            sel_ids = set(router_decision.selected_ast_frames)
+            drop_ids = set(router_decision.drop_irrelevant_frames)
+            pruned = [
+                f for f in paged_frames
+                if (f.frame_id in sel_ids or not sel_ids) and f.frame_id not in drop_ids
+            ]
+            if pruned:
+                paged_frames = pruned
+
+        eviction_res = core.frame_evictor.evict(paged_frames, token_budget=max_tokens)
+        retained_frames = eviction_res.retained_frames
+
+        # Optional Proprietary Moat Enhancement (private_moat)
+        moat_header = ""
+        try:
+            from private_moat.behavioral_hotspot_engine import BehavioralHotspotEngine
+            from private_moat.foveated_ast_compactor import FoveatedASTCompactor
+
+            hotspot_eng = BehavioralHotspotEngine(workspace_root=core.workspace_root)
+            retained_frames = hotspot_eng.rerank_and_expand_frames(
+                user_prompt=query,
+                candidate_frames=retained_frames,
+            )
+            compactor = FoveatedASTCompactor(top_k_focal=1)
+            retained_frames, _, _ = compactor.compact_frames(
+                frames=retained_frames,
+                user_prompt=query,
+            )
+            moat_header = " [Phonix Pro Foveated]"
+        except (ImportError, Exception):
+            moat_header = ""
+
+        # Step E: Zero-Trust AST Sanitization
+        rendered_blocks = []
+        total_tokens = 0
+        for f in retained_frames:
+            san = core.sanitizer.sanitize(f.raw_code)
+            total_tokens += f.token_count
+            rendered_blocks.append(
+                f"=== AST Frame: {f.frame_id} (Symbol: {f.symbol_name}, File: {f.file_path}, "
+                f"Lines {f.start_line}-{f.end_line}, {f.token_count} tokens) ===\n"
+                f"{san.sanitized_text}\n"
+            )
+
+        if not rendered_blocks:
+            return f"No AST frames matched query '{query}'. Candidate files checked: {candidate_files}"
+        return (
+            f"Phonix Context MMU{moat_header}: Paged & Pruned {len(retained_frames)} AST frames ({total_tokens} tokens / budget {max_tokens}):\n\n"
+            + "\n".join(rendered_blocks)
+        )
+
+    def _tool_verify_zero_trust(
+        self,
+        text: str = "",
+        role: str = "engineer",
+        department: str = "engineering",
+        target_upstream: str = "anthropic",
+        workspace_root: str | None = None,
+    ) -> str:
+        """Formal Zero-Trust verification and policy evaluation with optional HTTP delegation."""
+        remote = self._try_http_gateway(
+            "/v1/z3/verify",
+            {
+                "text": text,
+                "role": role,
+                "department": department,
+                "target_upstream": target_upstream,
+                "workspace_root": workspace_root or os.environ.get("PHONIX_WORKSPACE") or os.getcwd(),
+            },
+        )
+        if remote is not None:
+            return remote
+
+        core = self._resolve_active_core(explicit_workspace=workspace_root)
+        san = core.sanitizer.sanitize(text)
+        req = PolicyRequest(
+            user_id="mcp-agent",
+            role=role,
+            department=department,
+            target_upstream=target_upstream,
+            estimated_tokens=len(text) // 4,
+            unredacted_secrets_count=0,
+        )
+        decision = core.policy_engine.evaluate(req)
+
+        redacted_details = [
+            f"- {r.category} -> {r.placeholder} (len: {len(r.original_value)})"
+            for r in san.redactions
+        ]
+        details_str = "\n".join(redacted_details) if redacted_details else "None (Clean)"
+
+        return (
+            f"=== Phonix Zero-Trust Safety Verification ===\n"
+            f"Decision: {'ALLOWED' if decision.is_allowed else 'BLOCKED'}\n"
+            f"Z3 Proof Status: {decision.z3_proof_status}\n"
+            f"Reason: {decision.reason}\n"
+            f"Enforced Upstream: {decision.enforced_upstream}\n"
+            f"Detected Sensitive Literals ({san.redaction_count}):\n{details_str}\n\n"
+            f"[Sanitized Text Preview]\n{san.sanitized_text[:500]}"
+        )
+
     def _dispatch_tool_call(
         self, req_id: Any, tool_name: str, args: dict[str, Any]
     ) -> dict[str, Any]:
@@ -262,175 +536,29 @@ class PhonixMCPServer:
         try:
             # 1. phonix_repo_map
             if tool_name == "phonix_repo_map":
-                path_prefix = args.get("path_prefix", "").strip()
-                core = self._resolve_active_core(query=path_prefix)
-                cached = core.kv_prefix_cache.get_prefix("repo_symbol_map")
-                raw_map = cached.text if cached else ""
-
-                if path_prefix and raw_map:
-                    filtered_lines = [
-                        line for line in raw_map.splitlines()
-                        if line.startswith(path_prefix) or path_prefix in line
-                    ]
-                    map_text = "\n".join(filtered_lines) if filtered_lines else f"# No files matched prefix '{path_prefix}'"
-                else:
-                    map_text = raw_map or "# Repository symbol map is empty."
-
-                formatted_result = (
-                    f"=== Phonix Context MMU Repository Symbol Map ===\n"
-                    f"Indexed Files: {core.file_trie.total_files} | Registered Frames: {len(core._frame_registry)}\n"
-                    f"Tip: Call 'phonix_get_pruned_context' for specific functions or classes to save token quota.\n\n"
-                    f"{map_text}"
+                res = self._tool_repo_map(
+                    path_prefix=args.get("path_prefix", "").strip(),
+                    max_tokens=int(args.get("max_tokens", 256)),
+                    workspace_root=args.get("workspace_root"),
                 )
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "result": {"content": [{"type": "text", "text": formatted_result}], "isError": False},
+                    "result": {"content": [{"type": "text", "text": res}], "isError": False},
                 }
 
             # 2. phonix_get_pruned_context (aliased from phonix_page_context)
             elif tool_name in ("phonix_get_pruned_context", "phonix_page_context"):
-                query = args.get("query", "")
-                max_tokens = int(args.get("max_tokens", 1536))
-                core = self._resolve_active_core(query=query)
-
-                # Step A: Speculative Trie matching for file paths
-                core.speculative_inspector.reset_stream()
-                inspection = core.speculative_inspector.process_chunk(query)
-
-                candidate_files = list(inspection.candidate_files)
-                for arg_file in args.get("target_files", []):
-                    if arg_file not in candidate_files:
-                        candidate_files.append(arg_file)
-
-                # Step B: Gather candidate frames from matched files AND symbol/keyword search
-                frames = []
-                seen_ids: set[str] = set()
-                for file_path in candidate_files:
-                    f_list = core._file_to_frames.get(file_path, [])
-                    if not f_list:
-                        f_list = core.ast_slicer.slice_file(file_path)
-                    for f in f_list:
-                        if f.frame_id not in seen_ids:
-                            frames.append(f)
-                            seen_ids.add(f.frame_id)
-
-                # Also match file paths, stems, and symbols across the workspace
-                query_lower = query.lower()
-                tokens = set(re.findall(r"[a-zA-Z0-9_\-]+", query_lower))
-
-                for fpath, flist in core._file_to_frames.items():
-                    fpath_lower = fpath.lower()
-                    stem_lower = Path(fpath).stem.lower()
-                    base_lower = Path(fpath).name.lower()
-                    if (
-                        stem_lower in tokens
-                        or base_lower in tokens
-                        or (len(query_lower) >= 4 and query_lower in fpath_lower)
-                        or any(t in stem_lower for t in tokens if len(t) >= 4)
-                    ):
-                        for f in flist:
-                            if f.frame_id not in seen_ids:
-                                frames.append(f)
-                                seen_ids.add(f.frame_id)
-
-                for f in core._frame_registry.values():
-                    if f.frame_id in seen_ids:
-                        continue
-                    sym_lower = (f.symbol_name or "").lower()
-                    fpath_lower = (f.file_path or "").lower()
-                    if (
-                        (sym_lower and len(sym_lower) >= 3 and (sym_lower in query_lower or sym_lower in tokens))
-                        or (fpath_lower and (fpath_lower in query_lower or query_lower in fpath_lower))
-                        or any(t in sym_lower for t in tokens if len(t) >= 4)
-                    ):
-                        frames.append(f)
-                        seen_ids.add(f.frame_id)
-
-                # If still empty, run smart Micro-Router relevance scoring across all indexed frames
-                if not frames and core._frame_registry:
-                    all_frames = list(core._frame_registry.values())
-                    router_res = core.micro_router.route_and_prune(
-                        user_prompt=query, candidate_frames=all_frames
-                    )
-                    sel_set = set(router_res.selected_ast_frames)
-                    frames = [f for f in all_frames if f.frame_id in sel_set]
-
-                # Step C: Call-graph BFS expansion (1-hop / 2-hop)
-                seed_symbols = [f.symbol_name for f in frames[:5]]
-                if seed_symbols:
-                    paged_frames = core.call_graph_pager.page_graph(
-                        seed_symbols, max_hops=2, max_token_budget=max_tokens
-                    )
-                    paged_ids = {f.frame_id for f in paged_frames}
-                    for f in frames:
-                        if f.frame_id not in paged_ids:
-                            paged_frames.append(f)
-                            paged_ids.add(f.frame_id)
-                else:
-                    paged_frames = frames[:6]
-
-                # Step D: Micro-Router GBNF Pruning + MMU Eviction
-                if paged_frames:
-                    router_decision = core.micro_router.route_and_prune(
-                        user_prompt=query, candidate_frames=paged_frames
-                    )
-                    sel_ids = set(router_decision.selected_ast_frames)
-                    drop_ids = set(router_decision.drop_irrelevant_frames)
-                    pruned = [
-                        f for f in paged_frames
-                        if (f.frame_id in sel_ids or not sel_ids) and f.frame_id not in drop_ids
-                    ]
-                    if pruned:
-                        paged_frames = pruned
-
-                eviction_res = core.frame_evictor.evict(paged_frames, token_budget=max_tokens)
-                retained_frames = eviction_res.retained_frames
-
-                # Optional Proprietary Moat Enhancement (private_moat)
-                moat_header = ""
-                try:
-                    from private_moat.behavioral_hotspot_engine import BehavioralHotspotEngine
-                    from private_moat.foveated_ast_compactor import FoveatedASTCompactor
-
-                    hotspot_eng = BehavioralHotspotEngine(workspace_root=core.workspace_root)
-                    retained_frames = hotspot_eng.rerank_and_expand_frames(
-                        user_prompt=query,
-                        candidate_frames=retained_frames,
-                    )
-                    compactor = FoveatedASTCompactor(top_k_focal=1)
-                    retained_frames, _, _ = compactor.compact_frames(
-                        frames=retained_frames,
-                        user_prompt=query,
-                    )
-                    moat_header = " [Phonix Pro Foveated]"
-                except (ImportError, Exception):
-                    moat_header = ""
-
-                # Step E: Zero-Trust AST Sanitization
-                rendered_blocks = []
-                total_tokens = 0
-                for f in retained_frames:
-                    san = core.sanitizer.sanitize(f.raw_code)
-                    total_tokens += f.token_count
-                    rendered_blocks.append(
-                        f"=== AST Frame: {f.frame_id} (Symbol: {f.symbol_name}, File: {f.file_path}, "
-                        f"Lines {f.start_line}-{f.end_line}, {f.token_count} tokens) ===\n"
-                        f"{san.sanitized_text}\n"
-                    )
-
-                if not rendered_blocks:
-                    content_text = f"No AST frames matched query '{query}'. Candidate files checked: {candidate_files}"
-                else:
-                    content_text = (
-                        f"Phonix Context MMU{moat_header}: Paged & Pruned {len(retained_frames)} AST frames ({total_tokens} tokens / budget {max_tokens}):\n\n"
-                        + "\n".join(rendered_blocks)
-                    )
-
+                res = self._tool_get_pruned_context(
+                    query=args.get("query", ""),
+                    max_tokens=int(args.get("max_tokens", 1536)),
+                    workspace_root=args.get("workspace_root"),
+                    target_files=args.get("target_files", []),
+                )
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "result": {"content": [{"type": "text", "text": content_text}], "isError": False},
+                    "result": {"content": [{"type": "text", "text": res}], "isError": False},
                 }
 
             # 3. phonix_verify_zero_trust (aliased from phonix_verify_safety)
@@ -439,38 +567,17 @@ class PhonixMCPServer:
                 role = args.get("role") or args.get("user_role") or "engineer"
                 department = args.get("department", "engineering")
                 target_upstream = args.get("target_upstream", "anthropic")
-                core = self._resolve_active_core()
-
-                san = core.sanitizer.sanitize(text_to_verify)
-                req = PolicyRequest(
-                    user_id="mcp-agent",
+                res = self._tool_verify_zero_trust(
+                    text=text_to_verify,
                     role=role,
                     department=department,
                     target_upstream=target_upstream,
-                    estimated_tokens=len(text_to_verify) // 4,
-                    unredacted_secrets_count=0,
-                )
-                decision = core.policy_engine.evaluate(req)
-
-                redacted_details = [
-                    f"- {r.category} -> {r.placeholder} (len: {len(r.original_value)})"
-                    for r in san.redactions
-                ]
-                details_str = "\n".join(redacted_details) if redacted_details else "None (Clean)"
-
-                summary_text = (
-                    f"=== Phonix Zero-Trust Safety Verification ===\n"
-                    f"Decision: {'ALLOWED' if decision.is_allowed else 'BLOCKED'}\n"
-                    f"Z3 Proof Status: {decision.z3_proof_status}\n"
-                    f"Reason: {decision.reason}\n"
-                    f"Enforced Upstream: {decision.enforced_upstream}\n"
-                    f"Detected Sensitive Literals ({san.redaction_count}):\n{details_str}\n\n"
-                    f"[Sanitized Text Preview]\n{san.sanitized_text[:500]}"
+                    workspace_root=args.get("workspace_root"),
                 )
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "result": {"content": [{"type": "text", "text": summary_text}], "isError": False},
+                    "result": {"content": [{"type": "text", "text": res}], "isError": False},
                 }
 
             # Optional compatibility helper: phonix_inspect_symbol

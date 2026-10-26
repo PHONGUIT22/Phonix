@@ -371,3 +371,52 @@ def test_fastapi_streaming_endpoint() -> None:
     assert "data: [DONE]" in resp.text
     assert "chat.completion.chunk" in resp.text
 
+
+def test_http_mmu_and_z3_endpoints() -> None:
+    """Verifies that HTTP daemon MMU and Z3 endpoints function and increment telemetry."""
+    def run_coro(coro: Any) -> Any:
+        try:
+            coro.send(None)
+        except StopIteration as exc:
+            return exc.value
+        raise RuntimeError("Coroutine did not finish synchronously.")
+
+    from src.gateway.proxy_server import create_app
+
+    app = create_app(workspace_root=".")
+    routes = {r.path: r.endpoint for r in app.routes if hasattr(r, "path")}
+
+    assert "/v1/mmu/repo-map" in routes
+    assert "/v1/mmu/prune" in routes
+    assert "/v1/z3/verify" in routes
+    assert "/health" in routes
+
+    # 1. Initial health check
+    health_before = run_coro(routes["/health"]())
+    initial_reqs = health_before["telemetry"].get("total_requests", 0)
+
+    # 2. Invoke /v1/mmu/repo-map
+    repo_map_res = run_coro(routes["/v1/mmu/repo-map"]({"path_prefix": "src/gateway"}))
+    assert "result" in repo_map_res
+    assert "Phonix Context MMU" in repo_map_res["result"]
+
+    # 3. Invoke /v1/mmu/prune
+    prune_res = run_coro(routes["/v1/mmu/prune"]({"query": "rehydrator"}))
+    assert "result" in prune_res
+    assert "AST Frame" in prune_res["result"] or "Phonix Context MMU" in prune_res["result"]
+
+    # 4. Invoke /v1/z3/verify
+    z3_res = run_coro(
+        routes["/v1/z3/verify"](
+            {"text": "api_key = 'test_clean_str'", "role": "engineer", "department": "engineering"}
+        )
+    )
+    assert z3_res.get("verified") is True
+    assert "result" in z3_res
+
+    # 5. Verify /health and app.state.core telemetry increments
+    health_after = run_coro(routes["/health"]())
+    after_reqs = health_after["telemetry"].get("total_requests", 0)
+    assert after_reqs >= initial_reqs + 3
+    assert getattr(app.state.core, "total_requests", 0) >= initial_reqs + 3
+

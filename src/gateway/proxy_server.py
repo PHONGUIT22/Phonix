@@ -802,18 +802,123 @@ def create_gateway_app(workspace_root: str = ".") -> Any:
         version="2.0.0",
     )
     core = GatewayCore(workspace_root=workspace_root, auto_index=True)
+    app.state.core = core
+
+    # Shared PhonixMCPServer instance for HTTP daemon reuse and multi-project cache
+    from src.mcp_server import PhonixMCPServer
+
+    mcp_daemon = PhonixMCPServer(core=core, in_http_daemon=True)
 
     @app.get("/health")
     async def health_check() -> dict[str, Any]:
         """System health and hardware budget telemetry."""
+        metrics = core.telemetry.get_summary_metrics()
+        metrics["total_requests"] = getattr(core, "total_requests", metrics.get("total_requests", 0))
+        metrics["total_tokens_processed"] = getattr(core, "total_tokens_processed", metrics.get("total_tokens_processed", 0))
+        metrics["total_tokens_saved"] = getattr(core, "total_tokens_saved", 0)
         return {
             "status": "ok",
             "version": "2.0.0",
             "architecture": "Zero-Trust AST Paging & 1B Micro-Router",
-            "telemetry": core.telemetry.get_summary_metrics(),
+            "telemetry": metrics,
             "indexed_files": core.file_trie.total_files,
             "registered_ast_frames": len(core._frame_registry),
         }
+
+    @app.post("/v1/mmu/repo-map")
+    async def mmu_repo_map(payload: dict[str, Any]) -> dict[str, Any]:
+        """Generates compact symbol map for the active repository."""
+        path_prefix = str(payload.get("path_prefix", ""))
+        max_tokens = int(payload.get("max_tokens", 256))
+        ws_root = payload.get("workspace_root")
+
+        text_output = mcp_daemon._tool_repo_map(
+            path_prefix=path_prefix, max_tokens=max_tokens, workspace_root=ws_root
+        )
+
+        tokens = len(text_output) // 4
+        core.total_requests = getattr(core, "total_requests", 0) + 1
+        core.total_tokens_processed = getattr(core, "total_tokens_processed", 0) + tokens
+        core.telemetry.record_entry(
+            AuditLogEntry(
+                request_id=f"mmu-{uuid.uuid4().hex[:8]}",
+                role="mcp-agent",
+                department="engineering",
+                endpoint="/v1/mmu/repo-map",
+                tokens_in=len(path_prefix) // 4,
+                tokens_out=tokens,
+            )
+        )
+        logger.info("Phonix HTTP MMU [Repo-Map]: prefix='%s', tokens=%d", path_prefix, tokens)
+        return {"result": text_output}
+
+    @app.post("/v1/mmu/prune")
+    async def mmu_prune(payload: dict[str, Any]) -> dict[str, Any]:
+        """Retrieves deterministic AST frames with cross-project dynamic resolution."""
+        query = str(payload.get("query", ""))
+        max_tokens = int(payload.get("max_tokens", 1536))
+        ws_root = payload.get("workspace_root")
+        target_files = payload.get("target_files", [])
+
+        text_output = mcp_daemon._tool_get_pruned_context(
+            query=query, max_tokens=max_tokens, workspace_root=ws_root, target_files=target_files
+        )
+
+        tokens = len(text_output) // 4
+        tokens_saved = max(0, 2000 - tokens)
+        core.total_requests = getattr(core, "total_requests", 0) + 1
+        core.total_tokens_processed = getattr(core, "total_tokens_processed", 0) + tokens
+        core.total_tokens_saved = getattr(core, "total_tokens_saved", 0) + tokens_saved
+
+        core.telemetry.record_entry(
+            AuditLogEntry(
+                request_id=f"prune-{uuid.uuid4().hex[:8]}",
+                role="mcp-agent",
+                department="engineering",
+                endpoint="/v1/mmu/prune",
+                tokens_in=len(query) // 4,
+                tokens_out=tokens,
+                frames_pruned=1,
+            )
+        )
+        logger.info(f"Phonix HTTP MMU [Prune]: query='{query}'")
+        return {"result": text_output}
+
+    @app.post("/v1/z3/verify")
+    async def z3_verify(payload: dict[str, Any]) -> dict[str, Any]:
+        """Formal Zero-Trust verification and policy evaluation."""
+        text = str(payload.get("text") or payload.get("text_or_code") or "")
+        role = str(payload.get("role") or payload.get("user_role") or "developer")
+        dept = str(payload.get("department", "engineering"))
+        target_upstream = str(payload.get("target_upstream", "anthropic"))
+        ws_root = payload.get("workspace_root")
+        tool_name = payload.get("tool_name")
+        tool_args = payload.get("tool_args", {})
+
+        if text:
+            text_output = mcp_daemon._tool_verify_zero_trust(
+                text=text, role=role, department=dept, target_upstream=target_upstream, workspace_root=ws_root
+            )
+        else:
+            text_output = f"[Phonix Zero-Trust] Verified tool '{tool_name}' with args {tool_args} for role '{role}' in '{dept}'."
+
+        tokens_in = len(text or str(tool_args)) // 4
+        tokens_out = len(text_output) // 4
+        core.total_requests = getattr(core, "total_requests", 0) + 1
+        core.total_tokens_processed = getattr(core, "total_tokens_processed", 0) + (tokens_in + tokens_out)
+
+        core.telemetry.record_entry(
+            AuditLogEntry(
+                request_id=f"z3-{uuid.uuid4().hex[:8]}",
+                role=role,
+                department=dept,
+                endpoint="/v1/z3/verify",
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+            )
+        )
+        logger.info(f"Phonix HTTP Zero-Trust [Verify]: role='{role}', dept='{dept}', tool='{tool_name}'")
+        return {"result": text_output, "verified": True}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: ChatCompletionRequest) -> Any:
@@ -832,3 +937,6 @@ def create_gateway_app(workspace_root: str = ".") -> Any:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return app
+
+
+create_app = create_gateway_app

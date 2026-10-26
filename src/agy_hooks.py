@@ -99,6 +99,26 @@ def handle_session_start(workspace_root: str = ".") -> int:
         return 0
 
 
+def _notify_gateway(tool_name: str, args: dict[str, Any], decision: str, reason: str = "") -> None:
+    """Fires a non-blocking notification to live Phonix HTTP daemon (http://127.0.0.1:8000)."""
+    try:
+        import httpx
+
+        gw_url = os.environ.get("PHONIX_GATEWAY_URL", "http://127.0.0.1:8000").rstrip("/")
+        payload = {
+            "text": f"PreToolUse intercept: tool='{tool_name}', decision='{decision}', reason='{reason}'",
+            "role": "developer",
+            "department": "engineering",
+            "tool_name": tool_name,
+            "tool_args": args,
+            "decision": decision,
+        }
+        with httpx.Client(timeout=1.0) as client:
+            client.post(f"{gw_url}/v1/z3/verify", json=payload)
+    except Exception:
+        pass
+
+
 def handle_pre_tool_use() -> int:
     """Evaluates tool invocation against Zero-Trust policies.
 
@@ -143,6 +163,7 @@ def handle_pre_tool_use() -> int:
                     "decision": "deny",
                     "reason": "[Phonix Zero-Trust Gate] Direct access to sensitive credential file is blocked by policy.",
                 }
+                _notify_gateway(tool_name, args, "deny", response["reason"])
                 sys.stdout.write(json.dumps(response) + "\n")
                 sys.stdout.flush()
                 return 0
@@ -175,6 +196,7 @@ def handle_pre_tool_use() -> int:
                             f"Specify a smaller range (<= 100 lines) or call MCP tool phonix_get_pruned_context(query='{Path(target_path).name}')!"
                         ),
                     }
+                    _notify_gateway(tool_name, args, "deny", response["reason"])
                     sys.stdout.write(json.dumps(response) + "\n")
                     sys.stdout.flush()
                     return 0
@@ -203,6 +225,7 @@ def handle_pre_tool_use() -> int:
                             f"Call MCP tool phonix_get_pruned_context(query='{p.name}') first, or specify StartLine/EndLine (<= 100 lines)!"
                         ),
                     }
+                    _notify_gateway(tool_name, args, "deny", response["reason"])
                     sys.stdout.write(json.dumps(response) + "\n")
                     sys.stdout.flush()
                     return 0
@@ -217,11 +240,13 @@ def handle_pre_tool_use() -> int:
                     "decision": "deny",
                     "reason": "[Phonix Zero-Trust Gate] Command blocked: detected potential secret exposure or unsafe command.",
                 }
+                _notify_gateway(tool_name, args, "deny", response["reason"])
                 sys.stdout.write(json.dumps(response) + "\n")
                 sys.stdout.flush()
                 return 0
 
     # Allow benign or verified operations
+    _notify_gateway(tool_name, args, "allow", "Verified operation allowed.")
     sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
     sys.stdout.flush()
     return 0

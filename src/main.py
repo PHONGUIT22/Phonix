@@ -101,13 +101,15 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
             logger.debug("Could not write rule to %s: %s", r_path, exc)
 
     # 3. Global hooks.json (~/.gemini/config/hooks.json & ~/.gemini/hooks.json)
+    py_exec_str = f'"{py_exec}"' if " " in str(py_exec) else str(py_exec)
+    hooks_script_str = f'"{hooks_script}"' if " " in str(hooks_script) else str(hooks_script)
     hooks_payload = {
         "phonix-quota-and-security-gate": {
             "enabled": True,
             "SessionStart": [
                 {
                     "type": "command",
-                    "command": f'"{py_exec}" "{hooks_script}" session-start',
+                    "command": f"{py_exec_str} {hooks_script_str} session-start",
                     "timeout": 10,
                 }
             ],
@@ -117,7 +119,7 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f'"{py_exec}" "{hooks_script}" pre-tool-use',
+                            "command": f"{py_exec_str} {hooks_script_str} pre-tool-use",
                             "timeout": 5,
                         }
                     ],

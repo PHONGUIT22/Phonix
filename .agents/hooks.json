@@ -10,7 +10,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "read_file|view_file|run_command",
+        "matcher": "read_file|view_file|read_file_lines|run_command",
         "hooks": [
           {
             "type": "command",
