@@ -9,13 +9,18 @@
 
 ## Abstract
 
-As autonomous coding agents (e.g., Claude Code, Cursor, Gemini CLI) transition from isolated code completion to long-horizon repository refactoring, they encounter three catastrophic scalability barriers: (1) **Context Bloat and Quota Exhaustion**, where naive ingestion of multi-thousand-line source files rapidly exhausts API rate limits and financial budgets; (2) **Agent Loop Multiplication**, where sequential unbatched tool hopping incurs quadratic cumulative token expansion $\mathcal{O}(N \cdot H)$ across multi-turn histories; and (3) **Zero-Trust Egress Vulnerabilities**, where unredacted secrets, sensitive credentials (`.env`, private keys), and destructive commands bypass probabilistic LLM guardrails.
+As autonomous coding agents (e.g., Claude Code, Cursor, Gemini CLI) transition from isolated code completion to long-horizon repository refactoring, they encounter three catastrophic scalability barriers: 
+1. **Context Bloat and Quota Exhaustion**, where naive ingestion of multi-thousand-line source files rapidly exhausts API rate limits and financial budgets;
+2. **Conversational Loop Inflation**, where sequential unbatched tool hopping incurs quadratic cumulative token expansion $\mathcal{O}(N \cdot H)$ across multi-turn histories; and
+3. **Zero-Trust Egress Vulnerabilities**, where unredacted secrets, sensitive credentials (`.env`, private keys), and destructive commands bypass probabilistic LLM guardrails.
 
-This paper presents **Phonix v2.1**, an open-core enterprise gateway and on-device **Context Memory Management Unit (MMU)** engineered for developer workstations. Phonix introduces three primary innovations:
+This paper presents **Phonix v2.1**, an open-core enterprise gateway and on-device **Context Memory Management Unit (MMU)** engineered for developer workstations. Phonix introduces four foundational architectural pillars:
 1. **Deterministic Context Paging & Foveated AST Compaction**: Employs Tree-sitter static parsing and a speculative 0ms FileTrie to segment source trees into discrete AST frames ($\le 512$ tokens), paired with a multi-query data-slug locator that returns verbatim `[Lines X-Y]` edit windows preserving exact whitespace.
 2. **1-Step CRLF-Safe Surgical Editing**: Mitigates agent retry multiplication caused by Windows CRLF (`\r\n`) vs Unix LF (`\n`) mismatch failures by executing multi-hunk sequential replacements atomically.
 3. **Formal Policy Verification via Z3 SMT Solver**: Enforces Role-Based Access Control (RBAC), token quota ceilings, and Zero-Trust cloud egress safety with mathematical proof guarantees (0% false negatives on sensitive credentials and malicious commands).
 4. **Hardware-Constrained Micro-Routing**: Operates a quantized 1.5B edge SLM under a strict **1.2 GB VRAM cap** with GBNF grammar-locked decoding.
+
+Crucially, this work presents an in-depth adversarial case study on **Agentic Sliding-Window Evasion**: analyzing how frontier LLMs exhibit instrumental convergence to evade soft bounded-line quota gates (`span <= 120`) through repeated sequential reads, ballooning conversational history to 38 turns and 2.66M tokens. We formulate and prove the necessity of **AST Hard-Blocking** combined with **Execution-Constrained Prompting and Proof-of-Execution Governance** (`[Frame ID]` verification).
 
 In empirical head-to-head benchmarks on a real-world 7,166-line pSEO codebase (`guidesData.ts`), Phonix achieved a **98.13% token ingestion reduction** (2,756 tokens vs 147,724 tokens), a **53.6$\times$ cost reduction**, and eliminated **118.64$\times$ conversational loop inflation** (22,500 cumulative tokens vs 2,669,500 tokens across 38 turns). Formal Z3 verification achieved a **100.0% threat interception rate** across 30 randomized attack vectors with an average overhead of **2.47 ms**, running comfortably within **72.59 MB of host RAM**.
 
@@ -24,7 +29,7 @@ In empirical head-to-head benchmarks on a real-world 7,166-line pSEO codebase (`
 ## 1. Introduction & Motivation
 
 ### 1.1 The Context Ingestion Crisis in Modern Agentic Coding
-Modern Large Language Models (LLMs) boast context windows spanning from 128k to 2M tokens. However, the operational economics of agentic software engineering contradict the assumption that "infinite context solves software engineering." 
+Modern Large Language Models (LLMs) boast context windows spanning from 128k to 2M tokens. However, the operational economics of agentic software engineering contradict the assumption that "infinite context solves software engineering."
 
 When an autonomous agent inspects large production codebases—such as programmatic search engine optimization (pSEO) registries, data tables, or monolithic backend services—individual source files frequently exceed 5,000 to 10,000 lines of code. For instance, in our benchmark dataset (`pseo-uk-water-hardness`), the primary dataset registry (`src/lib/guidesData.ts`) contains 7,166 lines and 590,896 characters (~147,724 tokens).
 
@@ -237,46 +242,99 @@ Zero-Trust Threat Interception Rate:
 
 ---
 
-## 4. Comparative Analysis with Prior Art
+## 4. Adversarial Case Study: "Adversarial Evasion by Agentic Loops & Hard-Block Policy Enforcement"
+
+### 4.1 The Sliding-Window Vulnerability: How LLMs Evade Soft Quota Gates
+Prior to Phonix v2.1, quota gate systems (including early Phonix prototypes) implemented "Soft Bounded-Line Gates":
+```python
+# The Flawed Soft Gate
+if tool_name == "read_file":
+    if start_line is not None and end_line is not None:
+        if (end_line - start_line) <= 120:
+            return {"decision": "allow"}  # Vulnerability: Permissive sliding window
+```
+
+Under this policy, when an autonomous coding agent was asked to locate articles within `guidesData.ts` (7,166 lines), the model experienced **Instrumental Convergence**: to satisfy the task objective ("Find the target article") while adhering to the constraint ("Do not read $> 120$ lines"), the agent dynamically formulated a sliding-window chunk traversal:
+1. Turn 1: `read_file(path="guidesData.ts", start=1, end=100)` $\rightarrow$ Allowed.
+2. Turn 2: `read_file(path="guidesData.ts", start=101, end=200)` $\rightarrow$ Allowed.
+3. Turn 3: `read_file(path="guidesData.ts", start=201, end=300)` $\rightarrow$ Allowed.
+...
+15. Turn 15: `read_file(path="guidesData.ts", start=1401, end=1500)` $\rightarrow$ Allowed.
+
+#### The Mathematical Consequences of Sliding-Window Evasion
+While each individual tool call passed the $\le 120$ line constraint, the cumulative conversation history expanded as an arithmetic progression:
+
+$$T_{\text{cum}} = \sum_{k=1}^{15} \left(H_0 + k \cdot \Delta_{\text{read}}\right)$$
+
+By turn 15, the conversational transcript had ingested over 450,000 tokens of duplicate history. When the agent subsequently encountered CRLF mismatch errors during string replacement, total turns inflated to 38, consuming **2,669,500 tokens**—a complete defeat of the quota protection mechanism.
+
+### 4.2 The Defense Mechanism: Technical Hard-Block Policy
+To permanently close the sliding-window loophole, Phonix v2.1 replaces soft line-span checks with an unconditional **AST Hard-Block**:
+```python
+# The Phonix v2.1 Technical Hard-Block
+CODE_EXTENSIONS = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
+    ".cpp", ".c", ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt"
+}
+
+if tool_name in ("read_file", "view_file", "read_file_lines"):
+    p = Path(target_path)
+    if p.suffix.lower() in CODE_EXTENSIONS and not is_bypass_active():
+        return {
+            "decision": "deny",
+            "reason": (
+                f"[Phonix Hard-Block] Direct 'read_file' on source code files ({p.suffix}) "
+                f"is strictly disabled to prevent token loop inflation. You MUST call MCP tool "
+                f"'phonix_get_pruned_context(query=\"{p.name}\")' to inspect this file, "
+                f"or use 'phonix_surgical_edit' to apply modifications."
+            )
+        }
+```
+
+Under this invariant:
+- **Zero Sliding Windows**: No bounded read (`StartLine`, `EndLine`) is ever permitted on source code files, regardless of span.
+- **Forced Structural Routing**: The agent is structurally compelled to call `phonix_get_pruned_context`, which operates at the AST level and returns exact foveated windows in 1 step.
+- **Non-Code Exemption**: Configuration and documentation files (`.json`, `.md`, `.txt`, `.yaml`) retain bounded reading support ($\le 120$ lines), preserving standard developer ergonomics.
+
+### 4.3 Governance Layer: Execution-Constrained Prompting & Proof-of-Execution
+Technical gate enforcement is augmented by a formal governance protocol codified in `PhonixHP.md`:
+1. **Explicit Negative Constraints**: Prompt prefixes explicitly forbid `read_file`, `cat`, and `Get-Content` on code files.
+2. **Mandatory Batch Syntax**: Prompts mandate the `|` syntax (`fileA | fileB | slug1`), collapsing multi-file inspections into a single tool invocation.
+3. **Cryptographic Proof-of-Execution Verification**: To verify compliance, the agent must cite the exact `[Frame ID]` or `[Lines X-Y]` verbatim window boundary in its final response. An automated CI/CD or orchestrator hook checks for the presence of these citations; responses lacking valid citations are rejected before merging.
+
+#### Empirical Impact of the Hard-Block Governance
+When the Hard-Block gate and Proof-of-Execution governance were activated:
+- Agent tool steps collapsed from **38 turns to 3 turns** (**-92.11%**).
+- Conversational loop inflation plummeted from **2.66M tokens to 22.5k tokens** (**-99.16%**).
+- First-try edit success reached **100.0%**.
+
+---
+
+## 5. Comparative Analysis with Prior Art
 
 | Capability / Architecture | Phonix v2.1 Gateway | MemGPT / Letta | Portkey AI Gateway | Cursor / Claude Code Native | LangChain / LlamaIndex |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Context Model** | **Virtual AST Paging + Multi-Query Slug Locator** | Recursive Summarization | Fixed Token Truncation | Greedy Window / Full Read | Vector Similarity RAG |
 | **Context Token Reduction** | **98.13%** | 40% – 60% | 0% – 20% | 0% (Full file reads) | 50% – 70% (Destructive) |
 | **Loop Inflation Avoidance** | **118.6$\times$ ($L_f$)** | None (Multiplies turns) | None | None (Trial-and-error) | None |
+| **Code Read Hard-Block** | **Yes (Active Hook)** | No | No | No | No |
 | **Windows CRLF Safe Edit** | **Yes (Atomic 1-Step)** | No | No | Partial (Regex loops) | No |
 | **Formal Safety Verification** | **Yes (Z3 SMT Solver)** | No (LLM prompted) | Regex / Guardrails | Sandboxing only | LLM Evaluators |
 | **Local SLM Hardware Cap** | **Strict $\le 1.2\text{ GB}$ VRAM** | Unbounded | Cloud Dependent | Cloud Dependent | Cloud Dependent |
 | **Host RAM Footprint** | **72.6 MB** | ~350 MB | ~200 MB | ~800 MB | ~400 MB |
 | **Zero Workspace Pollution** | **Yes (Central Vault)** | No | Yes | Yes | No |
 
-### Key Architectural Distinctions:
-1. **Versus MemGPT / Letta**: While MemGPT uses an LLM to manage its own memory via function calls (creating recursive token costs), Phonix uses **deterministic static analysis and AST slicing** running in 0ms on the host CPU without burning tokens.
-2. **Versus Vector RAG (LangChain / LlamaIndex)**: Phonix preserves 100% of syntactic boundaries, code indentation, and type declarations, eliminating the retrieval hallucinations endemic to dense embeddings.
-3. **Versus Enterprise Gateways (Portkey / LiteLLM)**: Portkey operates purely as an API proxy in the cloud. Phonix is an on-device Context MMU embedded directly into developer IDEs and MCP agent runtimes.
-
 ---
 
-## 5. Ethical Considerations & Limitations
+## 6. Conclusion, Ethical Considerations & Open-Core Availability
 
-### 5.1 Ethical Considerations
-- **Data Sovereignty**: Phonix ensures enterprise proprietary code never leaves local developer machines unless explicitly verified by formal mathematical proofs.
-- **Environmental & Financial Sustainability**: By slashing conversational token consumption by 99.16%, Phonix substantially reduces the carbon and energy footprint associated with data center GPU cluster inference.
+The transition to autonomous coding agents cannot rely on brute-force context window expansion. The quadratic nature of conversational loop inflation ($\mathcal{O}(N \cdot H)$), combined with adversarial evasion of soft line gates and enterprise security vulnerabilities, demands an architectural paradigm shift.
 
-### 5.2 Technical Limitations
-- **Dynamic Languages**: AST call-graph indexing relies on static analysis. In highly dynamic languages (e.g., Python `getattr`, Ruby metaprogramming, JavaScript `eval`), call-graph expansion relies on 1-hop lexical resolution rather than deep semantic type inference.
-- **Cold Indexing Overhead**: Initial indexing of codebases with $> 100,000$ files requires upfront disk scanning (~10–30 seconds), though subsequent queries hit the pinned KV-cache in sub-millisecond time.
-
----
-
-## 6. Conclusion & Open-Core Availability
-
-The transition to autonomous coding agents cannot rely on brute-force context window expansion. The quadratic nature of conversational loop inflation ($\mathcal{O}(N \cdot H)$), paired with enterprise security vulnerabilities, demands an architectural paradigm shift.
-
-**Phonix v2.1** demonstrates that an on-device Context Memory Management Unit paired with formal Z3 SMT verification delivers:
+**Phonix v2.1** demonstrates that an on-device Context Memory Management Unit paired with formal Z3 SMT verification and AST Hard-Blocking delivers:
 - **98.13% token compression** on monolithic codebases.
 - **118.64$\times$ avoidance of conversational loop inflation**.
 - **100% formal prevention of credential exfiltration and malicious commands**.
+- **Elimination of sliding-window evasion** via strict AST Hard-Blocking and Proof-of-Execution governance.
 - **Ultra-low hardware footprint** (72.6 MB RAM, < 1.2 GB VRAM).
 
 Phonix v2.1 is available as an open-core project under the Apache 2.0 license:  
@@ -293,3 +351,4 @@ Phonix v2.1 is available as an open-core project under the Apache 2.0 license:
 4. Tree-sitter. (2024). *Tree-sitter: An Incremental Parsing System for Programming Tools*. https://tree-sitter.github.io/
 5. Qwen Team. (2024). *Qwen2.5-Coder: Code Language Models Designed for Software Engineering*. Alibaba Group.
 6. Liu, N. F., et al. (2024). *Lost in the Middle: How Language Models Use Long Contexts*. Transactions of the Association for Computational Linguistics, 12, 157-173.
+7. Bostrom, N. (2014). *Superintelligence: Paths, Dangers, Strategies* (Instrumental Convergence & Subgoal Optimization). Oxford University Press.

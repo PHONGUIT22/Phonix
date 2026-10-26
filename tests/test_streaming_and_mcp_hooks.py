@@ -285,34 +285,43 @@ def test_agy_lifecycle_hooks() -> None:
         res_cmd = json.loads(out_buf.getvalue())
         assert res_cmd["decision"] == "deny"
 
-        # Block unbounded full-file read of source code (> 120 lines) via Phonix Quota Gate
-        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py"}}}))
-        out_buf = io.StringIO()
-        sys.stdout = out_buf
-        handle_pre_tool_use()
-        res_unbounded = json.loads(out_buf.getvalue())
-        assert res_unbounded["decision"] == "deny"
-        assert "Phonix Quota Gate" in res_unbounded["reason"]
-
-        # Allow bounded read_file on source file (<= 120 lines)
+        # Hard-block direct read_file on source code files (.py, .ts, etc.) even when bounded
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 50}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
-        res_ok = json.loads(out_buf.getvalue())
-        assert res_ok["decision"] == "allow"
+        res_code_bounded = json.loads(out_buf.getvalue())
+        assert res_code_bounded["decision"] == "deny"
+        assert "Phonix Hard-Block" in res_code_bounded["reason"]
 
-        # Allow unbounded read when PHONIX_ALLOW_FULL_READ=1
-        os.environ["PHONIX_ALLOW_FULL_READ"] = "1"
+        # Hard-block unbounded full-file read of source code
+        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py"}}}))
+        out_buf = io.StringIO()
+        sys.stdout = out_buf
+        handle_pre_tool_use()
+        res_code_unbounded = json.loads(out_buf.getvalue())
+        assert res_code_unbounded["decision"] == "deny"
+        assert "Phonix Hard-Block" in res_code_unbounded["reason"]
+
+        # Allow bounded read_file on non-code files (e.g. pyproject.toml <= 120 lines)
+        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "pyproject.toml", "StartLine": 1, "EndLine": 50}}}))
+        out_buf = io.StringIO()
+        sys.stdout = out_buf
+        handle_pre_tool_use()
+        res_noncode_ok = json.loads(out_buf.getvalue())
+        assert res_noncode_ok["decision"] == "allow"
+
+        # Allow read when PHONIX_ALLOW_DIRECT_READ=1 or PHONIX_ALLOW_FULL_READ=1
+        os.environ["PHONIX_ALLOW_DIRECT_READ"] = "1"
         try:
-            sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py"}}}))
+            sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 50}}}))
             out_buf = io.StringIO()
             sys.stdout = out_buf
             handle_pre_tool_use()
             res_bypass = json.loads(out_buf.getvalue())
             assert res_bypass["decision"] == "allow"
         finally:
-            os.environ.pop("PHONIX_ALLOW_FULL_READ", None)
+            os.environ.pop("PHONIX_ALLOW_DIRECT_READ", None)
 
     finally:
         sys.stdin = old_stdin

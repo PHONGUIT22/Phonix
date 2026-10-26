@@ -168,11 +168,38 @@ def handle_pre_tool_use() -> int:
                 sys.stdout.flush()
                 return 0
 
-        # Rule 1b: Phonix Quota Gate for full-file reads on source code files
+        # Rule 1b: Technical Hard-Block for source code files
         code_exts = {
             ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
             ".cpp", ".c", ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt"
         }
+        clean_p = target_path.strip().strip("'\"")
+        if clean_p.startswith("file:///"):
+            clean_p = clean_p[8:]
+        elif clean_p.startswith("file://"):
+            clean_p = clean_p[7:]
+        p = Path(clean_p)
+
+        # Check if code file: Immediately Hard-Block direct reads regardless of line span
+        if (
+            p.suffix.lower() in code_exts
+            and os.environ.get("PHONIX_ALLOW_DIRECT_READ") != "1"
+            and os.environ.get("PHONIX_ALLOW_FULL_READ") != "1"
+        ):
+            response = {
+                "decision": "deny",
+                "reason": (
+                    f"[Phonix Hard-Block] Direct 'read_file' on source code files ({p.suffix}) is strictly disabled to prevent token loop inflation. "
+                    f"You MUST call MCP tool 'phonix_get_pruned_context(query=\"{p.name}\")' to inspect this file, "
+                    f"or use 'phonix_surgical_edit' to apply modifications."
+                ),
+            }
+            _notify_gateway(tool_name, args, "deny", response["reason"])
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+            return 0
+
+        # For non-code files (.json, .md, .txt, .yaml, .yml, .toml, .lock, .csv): allow bounded reads (<= 120 lines)
         start_line = args.get("StartLine") if args.get("StartLine") is not None else args.get("start_line")
         if start_line is None:
             start_line = args.get("startLine")
@@ -193,7 +220,7 @@ def handle_pre_tool_use() -> int:
                         "decision": "deny",
                         "reason": (
                             f"[Phonix Quota Gate] Bounded read range ({span} lines) of '{target_path}' exceeds 120 lines. "
-                            f"Specify a smaller range (<= 100 lines) or call MCP tool phonix_get_pruned_context(query='{Path(target_path).name}')!"
+                            f"Specify a smaller range (<= 100 lines)!"
                         ),
                     }
                     _notify_gateway(tool_name, args, "deny", response["reason"])
@@ -203,14 +230,8 @@ def handle_pre_tool_use() -> int:
             except (ValueError, TypeError):
                 bounded_ok = False
 
-        if not bounded_ok and os.environ.get("PHONIX_ALLOW_FULL_READ") != "1":
-            clean_p = target_path.strip().strip("'\"")
-            if clean_p.startswith("file:///"):
-                clean_p = clean_p[8:]
-            elif clean_p.startswith("file://"):
-                clean_p = clean_p[7:]
-            p = Path(clean_p)
-            if p.is_file() and p.suffix.lower() in code_exts:
+        if not bounded_ok and os.environ.get("PHONIX_ALLOW_FULL_READ") != "1" and os.environ.get("PHONIX_ALLOW_DIRECT_READ") != "1":
+            if p.is_file():
                 try:
                     with open(p, "r", encoding="utf-8", errors="ignore") as f:
                         line_count = sum(1 for _ in f)
@@ -222,7 +243,7 @@ def handle_pre_tool_use() -> int:
                         "decision": "deny",
                         "reason": (
                             f"[Phonix Quota Gate] Full-file read of '{target_path}' ({line_count} lines) blocked to protect Quota. "
-                            f"Call MCP tool phonix_get_pruned_context(query='{p.name}') first, or specify StartLine/EndLine (<= 100 lines)!"
+                            f"Specify StartLine/EndLine (<= 100 lines)!"
                         ),
                     }
                     _notify_gateway(tool_name, args, "deny", response["reason"])
