@@ -59,6 +59,22 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+PHONIX_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_config_path(path: str | Path | None) -> str | Path | None:
+    """Resolves config path, falling back to PHONIX_REPO_ROOT if running from another project."""
+    if not path:
+        return None
+    p = Path(path)
+    if p.is_file():
+        return p
+    if not p.is_absolute():
+        fallback = PHONIX_REPO_ROOT / p
+        if fallback.is_file():
+            return fallback
+    return path
+
 
 # --- OpenAI Compatible Data Models ---
 
@@ -137,15 +153,30 @@ def _ensure_phonix_hp_rule(workspace_root: str | Path) -> bool:
     """Ensures <workspace_root>/.agents/rules/PhonixHP.md exists.
 
     If not present, automatically creates the directory and injects PhonixHP.md.
+    Also ensures .agents/ is ignored in target git repo via .git/info/exclude.
     Returns True if injected or already exists, False if error.
     """
     try:
-        rules_dir = Path(workspace_root) / ".agents" / "rules"
+        ws_path = Path(workspace_root)
+        rules_dir = ws_path / ".agents" / "rules"
         rules_file = rules_dir / "PhonixHP.md"
         if not rules_file.is_file():
             rules_dir.mkdir(parents=True, exist_ok=True)
             rules_file.write_text(PHONIX_HP_RULE_CONTENT, encoding="utf-8")
             logger.info("Auto-injected PhonixHP.md quota rule into %s", rules_file)
+
+        # Append .agents/ to .git/info/exclude if git repository exists
+        git_exclude = ws_path / ".git" / "info" / "exclude"
+        if git_exclude.is_file():
+            try:
+                content = git_exclude.read_text(encoding="utf-8")
+                if ".agents/" not in content and ".agents" not in content:
+                    with open(git_exclude, "a", encoding="utf-8") as f:
+                        f.write("\n# Phonix Quota Armor & MCP Gate (auto-injected)\n.agents/\n.agents/*\n")
+                    logger.info("Appended .agents/ to %s to preserve clean git status", git_exclude)
+            except Exception as e_exclude:
+                logger.debug("Could not update .git/info/exclude: %s", e_exclude)
+
         return True
     except Exception as exc:
         logger.debug("Could not auto-inject PhonixHP.md into %s: %s", workspace_root, exc)
@@ -172,6 +203,12 @@ class GatewayCore:
         ".ruff_cache",
         "build",
         "dist",
+        "out",
+        ".next",
+        "rawdata",
+        "exports",
+        "public",
+        "coverage",
     }
 
     TARGET_EXTENSIONS: set[str] = {
@@ -196,6 +233,10 @@ class GatewayCore:
         upstreams_config_path: str | Path | None = "config/cloud_upstreams.yaml",
     ) -> None:
         self.workspace_root: str = workspace_root
+
+        hardware_config_path = _resolve_config_path(hardware_config_path)
+        policy_config_path = _resolve_config_path(policy_config_path)
+        upstreams_config_path = _resolve_config_path(upstreams_config_path)
 
         max_frame_tokens = 512
         max_hops = 2

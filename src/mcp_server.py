@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -38,6 +39,107 @@ class PhonixMCPServer:
         self.workspace_root = str(Path(workspace_root).resolve())
         _ensure_phonix_hp_rule(self.workspace_root)
         self.core = GatewayCore(workspace_root=self.workspace_root, auto_index=True)
+        self._workspace_cores: dict[str, GatewayCore] = {
+            os.path.abspath(self.workspace_root): self.core
+        }
+
+    def _get_or_create_core(self, ws_path: str) -> GatewayCore:
+        norm = os.path.abspath(ws_path)
+        if norm not in self._workspace_cores:
+            _ensure_phonix_hp_rule(norm)
+            self._workspace_cores[norm] = GatewayCore(workspace_root=norm, auto_index=True)
+        return self._workspace_cores[norm]
+
+    def _resolve_active_core(
+        self, query: str = "", explicit_workspace: str | None = None
+    ) -> GatewayCore:
+        """Dynamically switches to the appropriate workspace GatewayCore based on query context and cwd."""
+        if explicit_workspace:
+            return self._get_or_create_core(explicit_workspace)
+
+        # 1. Determine active base workspace: PHONIX_WORKSPACE -> os.getcwd() -> self.workspace_root
+        active_dir = os.environ.get("PHONIX_WORKSPACE") or os.getcwd()
+        norm_active = os.path.abspath(active_dir)
+        current_core = self._get_or_create_core(norm_active) if os.path.isdir(norm_active) else self.core
+
+        if not query:
+            return current_core
+
+        # 2. Check if current_core already matches files or symbols in query
+        query_lower = query.lower()
+        for fpath in current_core._file_to_frames.keys():
+            if fpath.lower() in query_lower or os.path.basename(fpath).lower() in query_lower:
+                return current_core
+
+        for sym in getattr(current_core.call_graph_pager, "_symbol_to_frames", {}).keys():
+            if len(sym) >= 3 and sym.lower() in query_lower:
+                return current_core
+
+        # 3. Smart Multi-Project Lookup: Search sibling projects under Phonix repo parent
+        repo_root = Path(__file__).resolve().parent.parent  # D:\UIT\NamBonUIT\Phonix
+        siblings_container = repo_root.parent  # D:\UIT\NamBonUIT
+
+        if siblings_container.is_dir():
+            tokens = set(re.findall(r"[a-zA-Z0-9_\-\.]+", query_lower))
+            try:
+                for sibling in siblings_container.iterdir():
+                    if not sibling.is_dir() or sibling.name.startswith("."):
+                        continue
+                    # Only consider coding repositories
+                    if not (
+                        (sibling / ".git").is_dir()
+                        or (sibling / "src").is_dir()
+                        or (sibling / "package.json").is_file()
+                    ):
+                        continue
+
+                    sib_path_str = str(sibling.resolve())
+                    # Check if sibling directory name or any file in sibling matches query tokens
+                    if sibling.name.lower() in tokens or any(
+                        t in sibling.name.lower() for t in tokens if len(t) >= 5
+                    ):
+                        return self._get_or_create_core(sib_path_str)
+
+                    # Check for file existence in sibling src, app, lib, or root
+                    for sub in ("src", "app", "lib", ""):
+                        search_dir = sibling / sub if sub else sibling
+                        if not search_dir.is_dir():
+                            continue
+                        if sub == "":
+                            try:
+                                for entry in search_dir.iterdir():
+                                    if entry.is_file():
+                                        fname_lower = entry.name.lower()
+                                        base_lower = os.path.splitext(fname_lower)[0]
+                                        if fname_lower in tokens or base_lower in tokens:
+                                            return self._get_or_create_core(sib_path_str)
+                            except Exception:
+                                pass
+                            continue
+
+                        for root, dirs, files in os.walk(search_dir):
+                            dirs[:] = [
+                                d for d in dirs
+                                if d not in GatewayCore.IGNORED_DIRS and not d.startswith(".")
+                            ]
+                            for fname in files:
+                                fname_lower = fname.lower()
+                                base_lower = os.path.splitext(fname_lower)[0]
+                                if (
+                                    fname_lower in tokens
+                                    or base_lower in tokens
+                                    or any(t == base_lower for t in tokens)
+                                ):
+                                    logger.info(
+                                        "Smart Workspace Switch: Routing query '%s' to sibling project %s",
+                                        query,
+                                        sibling.name,
+                                    )
+                                    return self._get_or_create_core(sib_path_str)
+            except Exception as e_scan:
+                logger.debug("Sibling workspace scan error: %s", e_scan)
+
+        return current_core
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         """Returns the 3 primary MCP tools exposed to coding CLI agents."""
@@ -161,7 +263,8 @@ class PhonixMCPServer:
             # 1. phonix_repo_map
             if tool_name == "phonix_repo_map":
                 path_prefix = args.get("path_prefix", "").strip()
-                cached = self.core.kv_prefix_cache.get_prefix("repo_symbol_map")
+                core = self._resolve_active_core(query=path_prefix)
+                cached = core.kv_prefix_cache.get_prefix("repo_symbol_map")
                 raw_map = cached.text if cached else ""
 
                 if path_prefix and raw_map:
@@ -175,7 +278,7 @@ class PhonixMCPServer:
 
                 formatted_result = (
                     f"=== Phonix Context MMU Repository Symbol Map ===\n"
-                    f"Indexed Files: {self.core.file_trie.total_files} | Registered Frames: {len(self.core._frame_registry)}\n"
+                    f"Indexed Files: {core.file_trie.total_files} | Registered Frames: {len(core._frame_registry)}\n"
                     f"Tip: Call 'phonix_get_pruned_context' for specific functions or classes to save token quota.\n\n"
                     f"{map_text}"
                 )
@@ -189,10 +292,11 @@ class PhonixMCPServer:
             elif tool_name in ("phonix_get_pruned_context", "phonix_page_context"):
                 query = args.get("query", "")
                 max_tokens = int(args.get("max_tokens", 1536))
+                core = self._resolve_active_core(query=query)
 
                 # Step A: Speculative Trie matching for file paths
-                self.core.speculative_inspector.reset_stream()
-                inspection = self.core.speculative_inspector.process_chunk(query)
+                core.speculative_inspector.reset_stream()
+                inspection = core.speculative_inspector.process_chunk(query)
 
                 candidate_files = list(inspection.candidate_files)
                 for arg_file in args.get("target_files", []):
@@ -203,30 +307,50 @@ class PhonixMCPServer:
                 frames = []
                 seen_ids: set[str] = set()
                 for file_path in candidate_files:
-                    f_list = self.core._file_to_frames.get(file_path, [])
+                    f_list = core._file_to_frames.get(file_path, [])
                     if not f_list:
-                        f_list = self.core.ast_slicer.slice_file(file_path)
+                        f_list = core.ast_slicer.slice_file(file_path)
                     for f in f_list:
                         if f.frame_id not in seen_ids:
                             frames.append(f)
                             seen_ids.add(f.frame_id)
 
-                # Also match symbols or keywords across the workspace registry if query mentions symbols
+                # Also match file paths, stems, and symbols across the workspace
                 query_lower = query.lower()
-                for f in self.core._frame_registry.values():
+                tokens = set(re.findall(r"[a-zA-Z0-9_\-]+", query_lower))
+
+                for fpath, flist in core._file_to_frames.items():
+                    fpath_lower = fpath.lower()
+                    stem_lower = Path(fpath).stem.lower()
+                    base_lower = Path(fpath).name.lower()
+                    if (
+                        stem_lower in tokens
+                        or base_lower in tokens
+                        or (len(query_lower) >= 4 and query_lower in fpath_lower)
+                        or any(t in stem_lower for t in tokens if len(t) >= 4)
+                    ):
+                        for f in flist:
+                            if f.frame_id not in seen_ids:
+                                frames.append(f)
+                                seen_ids.add(f.frame_id)
+
+                for f in core._frame_registry.values():
                     if f.frame_id in seen_ids:
                         continue
+                    sym_lower = (f.symbol_name or "").lower()
+                    fpath_lower = (f.file_path or "").lower()
                     if (
-                        (f.symbol_name and len(f.symbol_name) >= 3 and f.symbol_name.lower() in query_lower)
-                        or (f.file_path and f.file_path.lower() in query_lower)
+                        (sym_lower and len(sym_lower) >= 3 and (sym_lower in query_lower or sym_lower in tokens))
+                        or (fpath_lower and (fpath_lower in query_lower or query_lower in fpath_lower))
+                        or any(t in sym_lower for t in tokens if len(t) >= 4)
                     ):
                         frames.append(f)
                         seen_ids.add(f.frame_id)
 
                 # If still empty, run smart Micro-Router relevance scoring across all indexed frames
-                if not frames and self.core._frame_registry:
-                    all_frames = list(self.core._frame_registry.values())
-                    router_res = self.core.micro_router.route_and_prune(
+                if not frames and core._frame_registry:
+                    all_frames = list(core._frame_registry.values())
+                    router_res = core.micro_router.route_and_prune(
                         user_prompt=query, candidate_frames=all_frames
                     )
                     sel_set = set(router_res.selected_ast_frames)
@@ -235,7 +359,7 @@ class PhonixMCPServer:
                 # Step C: Call-graph BFS expansion (1-hop / 2-hop)
                 seed_symbols = [f.symbol_name for f in frames[:5]]
                 if seed_symbols:
-                    paged_frames = self.core.call_graph_pager.page_graph(
+                    paged_frames = core.call_graph_pager.page_graph(
                         seed_symbols, max_hops=2, max_token_budget=max_tokens
                     )
                     paged_ids = {f.frame_id for f in paged_frames}
@@ -248,7 +372,7 @@ class PhonixMCPServer:
 
                 # Step D: Micro-Router GBNF Pruning + MMU Eviction
                 if paged_frames:
-                    router_decision = self.core.micro_router.route_and_prune(
+                    router_decision = core.micro_router.route_and_prune(
                         user_prompt=query, candidate_frames=paged_frames
                     )
                     sel_ids = set(router_decision.selected_ast_frames)
@@ -260,7 +384,7 @@ class PhonixMCPServer:
                     if pruned:
                         paged_frames = pruned
 
-                eviction_res = self.core.frame_evictor.evict(paged_frames, token_budget=max_tokens)
+                eviction_res = core.frame_evictor.evict(paged_frames, token_budget=max_tokens)
                 retained_frames = eviction_res.retained_frames
 
                 # Optional Proprietary Moat Enhancement (private_moat)
@@ -269,7 +393,7 @@ class PhonixMCPServer:
                     from private_moat.behavioral_hotspot_engine import BehavioralHotspotEngine
                     from private_moat.foveated_ast_compactor import FoveatedASTCompactor
 
-                    hotspot_eng = BehavioralHotspotEngine(workspace_root=self.core.workspace_root)
+                    hotspot_eng = BehavioralHotspotEngine(workspace_root=core.workspace_root)
                     retained_frames = hotspot_eng.rerank_and_expand_frames(
                         user_prompt=query,
                         candidate_frames=retained_frames,
@@ -287,7 +411,7 @@ class PhonixMCPServer:
                 rendered_blocks = []
                 total_tokens = 0
                 for f in retained_frames:
-                    san = self.core.sanitizer.sanitize(f.raw_code)
+                    san = core.sanitizer.sanitize(f.raw_code)
                     total_tokens += f.token_count
                     rendered_blocks.append(
                         f"=== AST Frame: {f.frame_id} (Symbol: {f.symbol_name}, File: {f.file_path}, "
@@ -315,8 +439,9 @@ class PhonixMCPServer:
                 role = args.get("role") or args.get("user_role") or "engineer"
                 department = args.get("department", "engineering")
                 target_upstream = args.get("target_upstream", "anthropic")
+                core = self._resolve_active_core()
 
-                san = self.core.sanitizer.sanitize(text_to_verify)
+                san = core.sanitizer.sanitize(text_to_verify)
                 req = PolicyRequest(
                     user_id="mcp-agent",
                     role=role,
@@ -325,7 +450,7 @@ class PhonixMCPServer:
                     estimated_tokens=len(text_to_verify) // 4,
                     unredacted_secrets_count=0,
                 )
-                decision = self.core.policy_engine.evaluate(req)
+                decision = core.policy_engine.evaluate(req)
 
                 redacted_details = [
                     f"- {r.category} -> {r.placeholder} (len: {len(r.original_value)})"

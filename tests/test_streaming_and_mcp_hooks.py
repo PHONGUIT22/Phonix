@@ -13,6 +13,7 @@ Verifies:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -284,13 +285,34 @@ def test_agy_lifecycle_hooks() -> None:
         res_cmd = json.loads(out_buf.getvalue())
         assert res_cmd["decision"] == "deny"
 
-        # Allow benign read_file on source file
+        # Block unbounded full-file read of source code (> 120 lines) via Phonix Quota Gate
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py"}}}))
+        out_buf = io.StringIO()
+        sys.stdout = out_buf
+        handle_pre_tool_use()
+        res_unbounded = json.loads(out_buf.getvalue())
+        assert res_unbounded["decision"] == "deny"
+        assert "Phonix Quota Gate" in res_unbounded["reason"]
+
+        # Allow bounded read_file on source file (<= 120 lines)
+        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 50}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_ok = json.loads(out_buf.getvalue())
         assert res_ok["decision"] == "allow"
+
+        # Allow unbounded read when PHONIX_ALLOW_FULL_READ=1
+        os.environ["PHONIX_ALLOW_FULL_READ"] = "1"
+        try:
+            sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py"}}}))
+            out_buf = io.StringIO()
+            sys.stdout = out_buf
+            handle_pre_tool_use()
+            res_bypass = json.loads(out_buf.getvalue())
+            assert res_bypass["decision"] == "allow"
+        finally:
+            os.environ.pop("PHONIX_ALLOW_FULL_READ", None)
 
     finally:
         sys.stdin = old_stdin

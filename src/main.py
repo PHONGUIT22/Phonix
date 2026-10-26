@@ -20,7 +20,12 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from src.gateway.policy_engine import PolicyEngine, PolicyRequest
-from src.gateway.proxy_server import GatewayCore, _ensure_phonix_hp_rule, create_gateway_app
+from src.gateway.proxy_server import (
+    GatewayCore,
+    PHONIX_HP_RULE_CONTENT,
+    _ensure_phonix_hp_rule,
+    create_gateway_app,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,8 +37,143 @@ logger = logging.getLogger("phonix.main")
 app = create_gateway_app()
 
 
+def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
+    """Zero-Touch, Zero-Prompt Auto-Bootstrapper for agy IDE & CLI across all projects.
+
+    1. Configures global ~/.gemini/config/mcp_config.json with dynamic phonix-mmu (no hardcoded PHONIX_WORKSPACE).
+    2. Injects PhonixHP.md quota rules into global ~/.gemini/ paths & instructions.md.
+    3. Configures global hooks.json pointing to absolute agy_hooks.py.
+    4. Auto-discovers sibling projects under repo_root.parent, injects PhonixHP.md,
+       cleans stale configs, and appends .agents/ to .git/info/exclude for 0 untracked files.
+    """
+    root_path = Path(repo_root).resolve()
+    py_exec = sys.executable or "python"
+    hooks_script = str(root_path / "src" / "agy_hooks.py")
+
+    # 1. Global MCP config (~/.gemini/config/mcp_config.json)
+    home_gemini = Path.home() / ".gemini"
+    global_mcp_paths = [
+        home_gemini / "config" / "mcp_config.json",
+        home_gemini / "antigravity-cli" / "config" / "mcp_config.json",
+    ]
+    for mcp_path in global_mcp_paths:
+        try:
+            mcp_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg: dict[str, Any] = {"mcpServers": {}}
+            if mcp_path.is_file():
+                try:
+                    with open(mcp_path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                        if isinstance(loaded, dict):
+                            cfg = loaded
+                except Exception:
+                    pass
+            cfg.setdefault("mcpServers", {})["phonix-mmu"] = {
+                "command": py_exec,
+                "args": ["-m", "src.mcp_server"],
+                "env": {"PYTHONPATH": str(root_path)},
+            }
+            # Remove any stale hardcoded PHONIX_WORKSPACE or cwd from global config
+            cfg["mcpServers"]["phonix-mmu"].pop("cwd", None)
+            if "env" in cfg["mcpServers"]["phonix-mmu"]:
+                cfg["mcpServers"]["phonix-mmu"]["env"].pop("PHONIX_WORKSPACE", None)
+
+            with open(mcp_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            logger.info("Synchronized global MCP config at %s", mcp_path)
+        except Exception as exc:
+            logger.debug("Could not write MCP config at %s: %s", mcp_path, exc)
+
+    # 2. Global Rules & Instructions (PhonixHP.md)
+    rule_targets = [
+        home_gemini / "GEMINI.md",
+        home_gemini / "config" / "GEMINI.md",
+        home_gemini / "config" / "rules" / "PhonixHP.md",
+        home_gemini / "antigravity-cli" / "mcp" / "phonix-mmu" / "instructions.md",
+        home_gemini / "antigravity" / "mcp" / "phonix-mmu" / "instructions.md",
+    ]
+    for r_path in rule_targets:
+        try:
+            r_path.parent.mkdir(parents=True, exist_ok=True)
+            r_path.write_text(PHONIX_HP_RULE_CONTENT, encoding="utf-8")
+            logger.info("Injected PhonixHP rule to %s", r_path)
+        except Exception as exc:
+            logger.debug("Could not write rule to %s: %s", r_path, exc)
+
+    # 3. Global hooks.json (~/.gemini/config/hooks.json & ~/.gemini/hooks.json)
+    hooks_payload = {
+        "phonix-quota-and-security-gate": {
+            "enabled": True,
+            "SessionStart": [
+                {
+                    "type": "command",
+                    "command": f'"{py_exec}" "{hooks_script}" session-start',
+                    "timeout": 10,
+                }
+            ],
+            "PreToolUse": [
+                {
+                    "matcher": "read_file|view_file|read_file_lines|run_command",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f'"{py_exec}" "{hooks_script}" pre-tool-use',
+                            "timeout": 5,
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    for hk_path in [home_gemini / "config" / "hooks.json", home_gemini / "hooks.json"]:
+        try:
+            hk_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(hk_path, "w", encoding="utf-8") as f:
+                json.dump(hooks_payload, f, indent=2)
+            logger.info("Synchronized global hooks at %s", hk_path)
+        except Exception as exc:
+            logger.debug("Could not write hooks to %s: %s", hk_path, exc)
+
+    # 4. Sibling repos auto-discovery & injection
+    parent_dir = root_path.parent
+    if parent_dir.is_dir():
+        for child in parent_dir.iterdir():
+            if not child.is_dir() or child == root_path or child.name.startswith("."):
+                continue
+
+            # Ensure .agents/rules/PhonixHP.md and .git/info/exclude
+            _ensure_phonix_hp_rule(child)
+
+            # Ensure clean .agents/mcp_config.json without hardcoded PHONIX_WORKSPACE
+            child_agents = child / ".agents"
+            if child_agents.is_dir():
+                child_mcp = child_agents / "mcp_config.json"
+                if child_mcp.is_file():
+                    try:
+                        with open(child_mcp, "r", encoding="utf-8") as f:
+                            c_cfg = json.load(f)
+                        if isinstance(c_cfg, dict) and "mcpServers" in c_cfg:
+                            if "phonix-mmu" in c_cfg["mcpServers"]:
+                                c_cfg["mcpServers"]["phonix-mmu"].pop("cwd", None)
+                                if "env" in c_cfg["mcpServers"]["phonix-mmu"]:
+                                    c_cfg["mcpServers"]["phonix-mmu"]["env"].pop("PHONIX_WORKSPACE", None)
+                                with open(child_mcp, "w", encoding="utf-8") as f:
+                                    json.dump(c_cfg, f, indent=2)
+                    except Exception:
+                        pass
+
+                # Child hooks.json with absolute script path
+                child_hooks = child_agents / "hooks.json"
+                try:
+                    with open(child_hooks, "w", encoding="utf-8") as f:
+                        json.dump(hooks_payload, f, indent=2)
+                except Exception:
+                    pass
+
+
 def run_server(host: str = "0.0.0.0", port: int = 8000, reload: bool = False) -> None:
     """Launches the Phonix v2.0 FastAPI Gateway using Uvicorn."""
+    auto_bootstrap_agy_environment()
     try:
         import uvicorn  # type: ignore
 
@@ -91,6 +231,9 @@ def install_agy(repo_root: str = _REPO_ROOT) -> int:
     print("=" * 60)
     print(" Installing Phonix v2.0 Quota-Saver Suite for Antigravity CLI")
     print("=" * 60)
+
+    # Run complete zero-touch environment bootstrap
+    auto_bootstrap_agy_environment(repo_root=repo_root)
 
     # 1. Register in global ~/.gemini/config/mcp_config.json
     global_mcp_path = Path.home() / ".gemini" / "config" / "mcp_config.json"

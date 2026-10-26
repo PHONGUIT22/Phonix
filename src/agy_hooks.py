@@ -147,6 +147,66 @@ def handle_pre_tool_use() -> int:
                 sys.stdout.flush()
                 return 0
 
+        # Rule 1b: Phonix Quota Gate for full-file reads on source code files
+        code_exts = {
+            ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
+            ".cpp", ".c", ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt"
+        }
+        start_line = args.get("StartLine") if args.get("StartLine") is not None else args.get("start_line")
+        if start_line is None:
+            start_line = args.get("startLine")
+        end_line = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line")
+        if end_line is None:
+            end_line = args.get("endLine")
+
+        bounded_ok = False
+        if start_line is not None and end_line is not None:
+            try:
+                s = int(start_line)
+                e = int(end_line)
+                span = abs(e - s)
+                if span <= 120:
+                    bounded_ok = True
+                else:
+                    response = {
+                        "decision": "deny",
+                        "reason": (
+                            f"[Phonix Quota Gate] Bounded read range ({span} lines) of '{target_path}' exceeds 120 lines. "
+                            f"Specify a smaller range (<= 100 lines) or call MCP tool phonix_get_pruned_context(query='{Path(target_path).name}')!"
+                        ),
+                    }
+                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.flush()
+                    return 0
+            except (ValueError, TypeError):
+                bounded_ok = False
+
+        if not bounded_ok and os.environ.get("PHONIX_ALLOW_FULL_READ") != "1":
+            clean_p = target_path.strip().strip("'\"")
+            if clean_p.startswith("file:///"):
+                clean_p = clean_p[8:]
+            elif clean_p.startswith("file://"):
+                clean_p = clean_p[7:]
+            p = Path(clean_p)
+            if p.is_file() and p.suffix.lower() in code_exts:
+                try:
+                    with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                        line_count = sum(1 for _ in f)
+                except Exception:
+                    line_count = 0
+
+                if line_count > 120:
+                    response = {
+                        "decision": "deny",
+                        "reason": (
+                            f"[Phonix Quota Gate] Full-file read of '{target_path}' ({line_count} lines) blocked to protect Quota. "
+                            f"Call MCP tool phonix_get_pruned_context(query='{p.name}') first, or specify StartLine/EndLine (<= 100 lines)!"
+                        ),
+                    }
+                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.flush()
+                    return 0
+
     # Rule 2: Guard dangerous exfiltration and destructive commands against run_command
     if tool_name in ("run_command", "bash", "execute_command"):
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd") or ""

@@ -410,11 +410,11 @@ def test_antigravity_hooks_contract() -> None:
         assert res_curl_secret["decision"] == "deny"
         assert "[Phonix Zero-Trust Gate]" in res_curl_secret["reason"]
 
-        # E. pre-tool-use: allow benign read_file on source files
+        # E. pre-tool-use: allow benign bounded read_file on source files (<= 120 lines)
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
-            json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py"}}})
+            json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 50}}})
         )
         handle_pre_tool_use()
         res_allow = json.loads(out_buf.getvalue().strip())
