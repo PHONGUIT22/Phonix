@@ -513,3 +513,33 @@ def test_foreign_workspace_auto_sanitization(tmp_path: Path) -> None:
     except ImportError:
         pass
 
+
+def test_benchmark_suite_runs() -> None:
+    """Verifies that the empirical benchmark suite executes and produces valid metrics."""
+    from scripts.benchmark_phonix import run_all_benchmarks
+
+    results = run_all_benchmarks(save_artifacts=True)
+    assert "benchmark_1_context_compression" in results
+    assert "benchmark_2_tool_steps_and_reliability" in results
+    assert "benchmark_3_zero_trust_security" in results
+    assert "benchmark_4_hardware_footprint" in results
+
+    b1 = results["benchmark_1_context_compression"]
+    assert b1["compression_ratio_pct"] > 80.0
+    assert b1["tokens_saved"] > 5000
+
+    b2 = results["benchmark_2_tool_steps_and_reliability"]
+    assert b2["step_reduction_pct"] > 85.0
+    assert b2["loop_inflation_factor"] > 10.0
+
+    b3 = results["benchmark_3_zero_trust_security"]
+    assert b3["true_positive_rate_pct"] == 100.0
+    assert b3["false_positive_rate_pct"] == 0.0
+
+    b4 = results["benchmark_4_hardware_footprint"]
+    assert b4["vram_constraint_satisfied"] is True
+
+    assert Path("data/benchmark_results.json").is_file()
+    assert Path("docs/BENCHMARK_REPORT.md").is_file()
+
+
