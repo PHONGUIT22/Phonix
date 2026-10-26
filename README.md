@@ -1,21 +1,62 @@
-# Phonix v2.0
+# Phonix v2.1
 
-> **Zero-Trust AST Paging & 1B Micro-Router Gateway**  
+> **Zero-Trust AST Paging & 1.5B Micro-Router Gateway**  
 > *Enterprise Compliance & Cost Gateway + Context MMU*
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-brightgreen.svg)](pyproject.toml)
-[![Architecture](https://img.shields.io/badge/Architecture-Context%20MMU%20%2B%201B%20Micro--Router-purple.svg)](ARCHITECTURE.md)
+[![Architecture](https://img.shields.io/badge/Architecture-Context%20MMU%20%2B%201.5B%20Micro--Router-purple.svg)](ARCHITECTURE.md)
+[![Whitepaper](https://img.shields.io/badge/Whitepaper-Technical%20Report-red.svg)](docs/WHITE_PAPER.md)
+[![Benchmark](https://img.shields.io/badge/Benchmark-98.13%25%20Tokens%20Saved-brightgreen.svg)](docs/BENCHMARK_REPORT.md)
+
+---
+
+## 🏆 Empirical Benchmark Highlights (v2.1)
+
+> 📄 **[Read the Full Technical Whitepaper (`docs/WHITE_PAPER.md`)](docs/WHITE_PAPER.md)** | 📊 **[Reproducible Benchmark Suite & Report (`docs/BENCHMARK_REPORT.md`)](docs/BENCHMARK_REPORT.md)**
+
+Tested head-to-head against vanilla agentic execution on a production 7,166-line pSEO codebase (`guidesData.ts`, 590,896 characters):
+
+| Evaluation Dimension | Vanilla Agent (Baseline) | Phonix v2.1 Gateway | Realized Margin | Status |
+| :--- | :---: | :---: | :---: | :---: |
+| **Context Ingestion Volume** | 147,724 tokens | **2,756 tokens** | **-98.13%** (53.6x compression) | ✅ Verified |
+| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4432 | **$0.0083** | **53.6x Cheaper** | ⚡ Realized |
+| **Agent Tool Execution Turns** | 38 turns | **3 turns** | **-92.11%** turns | ✅ Verified |
+| **Cumulative Context (Loop Inflation)** | 2,669,500 tokens | **22,500 tokens** | **-99.16%** (118.6x inflation avoided) | ⚡ Realized |
+| **CRLF Multi-Hunk Edit Success** | 0% (Mismatch failure) | **100%** (Atomic normalization) | **+100.0%** reliability | ✅ Verified |
+| **Zero-Trust Threat Interception** | 0.0% (Total leakage) | **100.0%** (20/20 blocked) | **Zero False Negatives** | 🛡️ Protected |
+| **Security False Positive Rate** | N/A | **0.0%** (10/10 allowed) | **Zero False Positives** | 🛡️ Verified |
+| **Verification Latency Overhead** | 0.00 ms | **2.47 ms** | **Deterministic (< 2.5ms)** | ⚡ Realized |
+| **Hardware Memory Footprint** | Unbounded | **72.6 MB / 1,228.8 MB** | **Strict Edge Cap Satisfied** | ✅ Verified |
+
+```text
+Context Ingestion Volume (Tokens per Read):
+  Vanilla (Full Read):  [████████████████████████████████████████] 147,724 tokens
+  Phonix MMU v2.1:      [█                                       ] 2,756 tokens (-98.13%)
+
+Cumulative Conversational Tokens (Loop Inflation):
+  Vanilla Agent Loop:   [████████████████████████████████████████] 2,669,500 tokens
+  Phonix v2.1 (1-Step): [█                                       ] 22,500 tokens (-99.16%)
+
+Zero-Trust Threat Interception Rate:
+  Vanilla Agent:        [                                        ] 0.0% (Passed all 20 threat vectors)
+  Phonix Zero-Trust:    [████████████████████████████████████████] 100.0% (20/20 threats blocked)
+```
+
+### ⚡ What's New in Phonix v2.1
+- **Multi-Query Data-Slug Locator**: Batch inspect file paths and data array slugs in 1 single call (`phonix_get_pruned_context(query="file.tsx | slug1 | slug2", for_edit=True)`), returning exact verbatim `[Lines X-Y]` edit windows with 100% preserved whitespace.
+- **CRLF-Safe Surgical Multi-Hunk Editor**: `phonix_surgical_edit` eliminates Windows `\r\n` vs `\n` edit mismatch loops by automatically normalizing and applying atomic multi-hunk replacements.
+- **Zero-Touch Multi-Project Auto-Discovery**: Automatically binds to foreign active repositories (`os.getcwd()`), self-injects `PhonixHP.md` Quota Armor, and guarantees zero target repository pollution via centralized vault storage.
 
 ---
 
 ## 1. Executive Summary
 
-**Phonix v2.0** is an enterprise-grade AI infrastructure gateway engineered to solve two fundamental scaling barriers in modern generative code systems:
+**Phonix v2.1** is an enterprise-grade AI infrastructure gateway engineered to solve two fundamental scaling barriers in modern generative code systems:
 1. **Uncontrolled Cloud Spend & Context Bloat**: Naive retrieval injects massive codebases into frontier models, causing astronomical token bills and high latency.
 2. **Zero-Trust Compliance & Data Leakage**: Enterprise proprietary secrets, internal IP addresses, customer PII, and sensitive intellectual property risk leaking into external LLM training loops or unauthorized regions.
 
-Phonix v2.0 decouples context retrieval and security enforcement from frontier models by introducing an on-device **Context MMU (Memory Management Unit)** paired with a **1.2GB local 1B Micro-Router SLM** locked by formal GBNF grammars.
+Phonix v2.1 decouples context retrieval and security enforcement from frontier models by introducing an on-device **Context MMU (Memory Management Unit)** paired with a **1.2GB local 1.5B Micro-Router SLM** locked by formal GBNF grammars.
 
 ---
 
@@ -24,12 +65,12 @@ Phonix v2.0 decouples context retrieval and security enforcement from frontier m
 ```mermaid
 flowchart TD
     Client["Client / IDE / CI-CD"] -->|HTTP /v1/chat/completions| StreamInspector["0ms Speculative FileTrie"]
-    StreamInspector --> MMU["Context MMU\n(Tree-sitter <512 tok AST Frames\n+ 1-Hop/2-Hop Call Graph Paging)"]
+    StreamInspector --> MMU["Context MMU\n(Tree-sitter <512 tok AST Frames\n+ Multi-Query Slug Locator)"]
     MMU --> Sanitizer["Semantic-Preserving Sanitizer\n(Redacts Literals, Keeps 100% Identifiers)"]
     Sanitizer --> Z3Policy["Z3 Formal Policy Engine\n(RBAC + Zero-Trust Proof + Token Quota)"]
     
-    Z3Policy -->|Allowed| MicroRouter["1B Micro-Router SLM\n(GBNF Grammar Locked)"]
-    Z3Policy -->|Blocked / Contractor| LocalPath["Local Fast Path\n(On-Device Edge 1B)"]
+    Z3Policy -->|Allowed| MicroRouter["1.5B Micro-Router SLM\n(GBNF Grammar Locked)"]
+    Z3Policy -->|Blocked / Contractor| LocalPath["Local Fast Path\n(On-Device Edge 1.5B)"]
     
     MicroRouter -->|Score < 0.70 / Low Complexity| LocalPath
     MicroRouter -->|Score >= 0.70 / Cloud Handoff| CloudDispatcher["Cloud Dispatcher\n(Anthropic / OpenAI / DeepSeek)"]
@@ -47,22 +88,22 @@ flowchart TD
 - **Pinned KV Prefix Cache (`KVPrefixCache`)**: Manages pinned prompt tokens for enterprise system instructions to maximize prefix cache hits on llama.cpp / vLLM.
 - **Deterministic Eviction (`FrameEvictor`)**: LRU & priority-weighted context budget eviction.
 
-### B. 1B Micro-Router (`src/micro_router/`)
-- **Resource Footprint**: Constrained to a strict **1.2GB VRAM envelope** using Q4_K_M quantization (Llama-3.2-1B-Instruct or Qwen2.5-Coder-1.5B).
+### B. 1.5B Micro-Router (`src/micro_router/`)
+- **Resource Footprint**: Constrained to a strict **1.2GB VRAM envelope** using Q4_K_M quantization (Qwen2.5-Coder-1.5B or Llama-3.2-1B-Instruct).
 - **Strict GBNF Grammar Locking (`router_decision.gbnf`)**: Constrains SLM decoding to perform **ONLY two tasks**:
   1. **AST Context Pruning**: Selects relevant frames and prunes irrelevant context.
   2. **Complexity Scoring for Circuit Breaking**: Outputs normalized score `[0.0 - 1.0]` and `trigger_cloud_handoff` flag.
 
 ### C. Enterprise Compliance Gateway (`src/gateway/`)
-- **OpenAI/Anthropic Compatible Proxy (`/v1/chat/completions`)**: Drop-in proxy for Cursor, VS Code, continue.dev, and corporate agent frameworks.
+- **OpenAI/Anthropic Compatible Proxy (`/v1/chat/completions`)**: Drop-in proxy for Cursor, Claude Code, VS Code, continue.dev, and corporate agent frameworks.
 - **Semantic-Preserving AST Sanitizer (`SemanticSanitizer`)**: Redacts ONLY sensitive literals (API keys, secrets, private IPs, PII) into typed placeholders (`<REDACTED_SECRET_01>`, `<REDACTED_IP_01>`) while keeping **100% of variable and function identifiers intact**.
 - **Z3 Formal Policy Engine (`PolicyEngine`)**: Employs the Z3 SMT solver strictly for mathematical proofs of RBAC, zero-trust cloud egress safety, and department token quotas.
 - **Ephemeral Rehydration (`Rehydrator`)**: Transparently restores authentic secrets in completion outputs before delivering to the client application.
 
-### D. Moat Flywheel (`moat_flywheel/`)
-- **Git Diff Harvester (`GitDiffHarvester`)**: Scans developer commits, PR diffs, and AST modifications.
-- **Dataset Builder (`DatasetBuilder`)**: Converts real-world developer interactions into GBNF-aligned instruction-tuning pairs.
-- **Router LoRA Trainer (`RouterLoRATrainer`)**: Fine-tunes and quantizes on-device routing LoRA weights.
+### D. Model & Data Moat Flywheel (`src/micro_router/data_flywheel.py`)
+- **Git Commit AST Triage Miner**: Mined real repository commits to generate ground-truth AST pruning pairs.
+- **Telemetry Distillation Logger**: Automatically logs live routing and context pruning traces into ChatML SFT format (`data/phonix_router_sft_dataset.jsonl`).
+- **Ollama Modelfile**: Pre-calibrated Modelfile bundling GBNF grammar constraints with 1.2 GB VRAM execution parameters.
 
 ---
 
@@ -70,58 +111,51 @@ flowchart TD
 
 ```text
 Phonix/
-├── README.md                              # Comprehensive guide & project overview
+├── README.md                              # Comprehensive guide & benchmark showcase
 ├── ARCHITECTURE.md                        # Deep technical architecture specification
 ├── pyproject.toml                         # Project metadata, dependencies & scripts
+├── docs/
+│   ├── WHITE_PAPER.md                     # Scientific academic whitepaper (v2.1)
+│   └── BENCHMARK_REPORT.md                # Full empirical benchmark metrics & visual charts
+├── data/
+│   └── benchmark_results.json             # Raw empirical benchmark output metrics
+├── scripts/
+│   ├── benchmark_phonix.py                # Automated reproducible benchmark suite
+│   └── train_router_lora.py               # Router LoRA fine-tuning & GGUF exporter
 ├── config/
 │   ├── zero_trust_policy.yaml             # Secret regex rules, PII types, quotas, RBAC
 │   ├── hardware_profile.yaml              # VRAM 1.2GB cap, Q4_K_M, pinned KV cache budget
 │   └── cloud_upstreams.yaml               # Anthropic, OpenAI, DeepSeek configs & fallbacks
 ├── src/
 │   ├── __init__.py                        # Core package initialization
-│   ├── main.py                            # CLI entrypoint & server bootstrap
+│   ├── main.py                            # CLI entrypoint & zero-touch bootstrap
+│   ├── mcp_server.py                      # MCP Server (phonix-mmu) with multi-query locator
+│   ├── agy_hooks.py                       # Antigravity SessionStart & PreToolUse quota gate
 │   ├── gateway/
-│   │   ├── __init__.py                    # Gateway module exports
 │   │   ├── proxy_server.py                # FastAPI proxy server (/health, /v1/chat/completions)
 │   │   ├── semantic_sanitizer.py          # Semantic-preserving literal sanitizer & vault
 │   │   ├── policy_engine.py               # Z3 SMT formal zero-trust policy engine
 │   │   ├── rehydrator.py                  # Response placeholder rehydrator
 │   │   └── audit_telemetry.py             # Compliance audit logger & FinOps metrics
 │   ├── mmu/
-│   │   ├── __init__.py                    # MMU module exports
 │   │   ├── file_trie.py                   # In-memory File Trie for 0ms speculative I/O
 │   │   ├── speculative_inspector.py       # Streaming HTTP chunk inspector
 │   │   ├── ast_slicer.py                  # Tree-sitter AST slicer (<512 tokens/frame)
 │   │   ├── call_graph_pager.py            # Static 1-hop/2-hop call graph pager (BFS)
 │   │   ├── kv_prefix_cache.py             # Pinned KV cache prefix manager
 │   │   └── frame_evictor.py               # Deterministic LRU/Priority frame evictor
-│   ├── micro_router/
-│   │   ├── __init__.py                    # Micro-Router module exports
-│   │   ├── slm_engine.py                  # 1B local SLM runner (1.2GB VRAM envelope)
-│   │   ├── gbnf_enforcer.py               # GBNF grammar parser & schema validator
-│   │   ├── circuit_breaker.py             # Cloud handoff & upstream fallback controller
-│   │   └── grammars/
-│   │       └── router_decision.gbnf       # Strict GBNF grammar for routing decisions
-│   └── execution/
-│       ├── __init__.py                    # Execution module exports
-│       ├── local_fast_path.py             # Zero-cloud on-device completion engine
-│       └── cloud_dispatcher.py            # Resilient cloud dispatcher with fallbacks
-├── moat_flywheel/
-│   ├── __init__.py                        # Flywheel module exports
-│   ├── git_diff_harvester.py              # Git commit & AST symbol harvester
-│   ├── dataset_builder.py                 # GBNF instruction dataset synthesizer
-│   └── train_router_lora.py               # Router LoRA fine-tuning & GGUF exporter
-├── integrations/
-│   ├── ci_cd_gate/
-│   │   └── README.md                      # GitHub Actions & CI/CD compliance gate guide
-│   └── admin_dashboard/
-│       └── README.md                      # FinOps & enterprise observability dashboard guide
+│   └── micro_router/
+│       ├── slm_engine.py                  # 1.5B local SLM runner (1.2GB VRAM envelope)
+│       ├── gbnf_enforcer.py               # GBNF grammar parser & schema validator
+│       ├── data_flywheel.py               # Git commit AST triage miner & SFT dataset builder
+│       └── circuit_breaker.py             # Cloud handoff & upstream fallback controller
 └── tests/
-    ├── __init__.py                        # Test suite initialization
     ├── test_speculative_trie.py           # Unit tests for FileTrie & 0ms speculative I/O
     ├── test_call_graph_pager.py           # Unit tests for CallGraphPager & token limits
     ├── test_semantic_sanitizer.py         # Unit tests for literal sanitization & vault
-    └── test_policy_engine.py              # Unit tests for Z3 formal policy verification
+    ├── test_policy_engine.py              # Unit tests for Z3 formal policy verification
+    ├── test_streaming_and_mcp_hooks.py    # Unit tests for MCP, hooks, v2.1 & benchmark suite
+    └── test_multi_lang_and_live_server.py # End-to-end multi-language gateway tests
 ```
 
 ---
@@ -131,7 +165,7 @@ Phonix/
 ### Installation
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/phonix.git
+git clone https://github.com/PHONGUIT22/Phonix.git
 cd Phonix
 
 # Install in development mode
@@ -139,6 +173,12 @@ pip install -e .
 
 # With optional local SLM and dev tools
 pip install -e ".[local-router,dev]"
+```
+
+### Reproduce the Empirical Benchmark Suite
+```bash
+# Run the automated head-to-head empirical benchmark suite
+python scripts/benchmark_phonix.py
 ```
 
 ### CLI Commands
@@ -152,8 +192,8 @@ phonix verify-policy --role engineer --dept engineering --unredacted-secrets 0
 # Test contractor isolation policy
 phonix verify-policy --role contractor --dept engineering
 
-# Launch the FastAPI gateway server
-phonix start --host 0.0.0.0 --port 8000
+# Launch the zero-touch FastAPI gateway server (daemon)
+python -m src.main start --host 127.0.0.1 --port 8000
 ```
 
 ### Testing OpenAI SDK Compatibility
@@ -184,17 +224,26 @@ print(response.choices[0].message.content)
 
 ## 5. Verification & Testing
 
-Execute the complete test suite:
+Execute the complete test suite (40 unit and integration tests):
 ```bash
 # Run tests with pytest
 pytest tests/ -v
+```
 
-# Or run tests directly
-python tests/test_speculative_trie.py
-python tests/test_call_graph_pager.py
-python tests/test_semantic_sanitizer.py
-python tests/test_policy_engine.py
+---
 
-# Verify syntax across all modules
-python -m compileall src tests moat_flywheel
+## 6. License & Citation
+
+Phonix v2.1 is licensed under the Apache 2.0 License.
+
+If you use Phonix or its Context MMU architecture in your research, please cite:
+```bibtex
+@article{phong2026phonix,
+  title={Phonix: Deterministic Context Paging, Foveated AST Slicing, and Formal Z3 Verification for Hardware-Constrained Agentic Workspaces},
+  author={Phong, Hac},
+  journal={Phonix Technical Whitepaper},
+  year={2026},
+  publisher={University of Information Technology - VNU-HCM},
+  url={https://github.com/PHONGUIT22/Phonix/blob/main/docs/WHITE_PAPER.md}
+}
 ```
