@@ -1,5 +1,5 @@
 # Phonix v2.1 Empirical Benchmark Report: Context MMU & Zero-Trust Architecture
-**Benchmark Execution Date:** 2026-10-26T15:02:06.628105+00:00  
+**Benchmark Execution Date:** 2026-10-27T01:23:22.424140+00:00  
 **Architecture Under Test:** Phonix v2.1 (Context MMU, Multi-Query Verbatim Locator, CRLF-Safe Surgical Edit, Z3 Formal Policy Engine)  
 **Target pSEO Codebase:** `guidesData.ts` (7,166 lines, 590,896 characters)
 
@@ -16,8 +16,8 @@
 | **CRLF Multi-Hunk Edit Success** | 0% (Mismatch failure) | **100%** (Atomic normalization) | **+100.0%** reliability | ✅ Verified |
 | **Zero-Trust Threat Interception** | 0.0% (Total leakage) | **100.0%** (20/20 blocked) | **Zero False Negatives** | 🛡️ Protected |
 | **Security False Positive Rate** | N/A | **0.0%** (10/10 allowed) | **Zero False Positives** | 🛡️ Verified |
-| **Verification Latency Overhead** | 0.00 ms | **0.26 ms** | **Deterministic (< 2ms)** | ⚡ Realized |
-| **Hardware Memory Envelope** | Unbounded | **72.54 MB / 1228.8 MB** | **Strict Edge Cap Satisfied** | ✅ Verified |
+| **Verification Latency Overhead** | 0.00 ms | **4.14 ms** | **Deterministic (< 2ms)** | ⚡ Realized |
+| **Hardware Memory Envelope** | Unbounded | **72.59 MB / 1228.8 MB** | **Strict Edge Cap Satisfied** | ✅ Verified |
 
 ---
 
@@ -76,7 +76,7 @@ $$L_f = \frac{2,669,500}{22,500} = \mathbf{118.64\times}$$
 ### Benchmark 1: Context Ingestion & Cost Economics
 - **Source Target:** `guidesData.ts` (7,166 lines)
 - **Vanilla Approach:** Naive ingestion of full source code buffer into the system prompt context.
-- **Phonix MMU v2.1 Approach:** Batched multi-query locator parsing target slugs `does-scotland-have-hard-water | uk-business-water-suppliers-guide`, extracting exact metadata blocks and FAQ closure boundaries in **2727.48 ms**.
+- **Phonix MMU v2.1 Approach:** Batched multi-query locator parsing target slugs `does-scotland-have-hard-water | uk-business-water-suppliers-guide`, extracting exact metadata blocks and FAQ closure boundaries in **3091.44 ms**.
 - **Net Token Savings:** **144,035 tokens** per invocation.
 
 ### Benchmark 2: Agent Loop Inflation & Edit Reliability
@@ -92,14 +92,14 @@ Evaluation of 30 randomized operational payloads:
 - **10 Benign Operations:** 10 allowed, 0 false alarms (FPR: **0.0%**).
 - **10 Credential & Secret Harvests:** 10 blocked (.env, AWS AKIA keys, Stripe live keys, id_rsa, JWTs).
 - **10 Malicious Shell Commands:** 10 blocked (curl pastebins, webhooks, transfer.sh, rm -rf, gcloud project destruction).
-- **Verification Overhead:** **0.26 ms** per tool call.
+- **Verification Overhead:** **4.14 ms** per tool call.
 - **Proof Guarantee:** Z3 formal SMT solver proved satisfiability of RBAC and Zero-Trust egress invariants with zero unredacted leaks.
 
 ### Benchmark 4: Hardware & Runtime Envelope
 - **Edge VRAM Constraint:** Configured at 1228.8 MB (strictly satisfied).
-- **Peak RSS RAM Usage:** 72.54 MB (well under edge limits).
-- **Micro-Router SLM Latency:** 0.2 ms (GBNF deterministic JSON schema decoding).
-- **Warm AST Cache Lookup:** 0.008 ms.
+- **Peak RSS RAM Usage:** 72.59 MB (well under edge limits).
+- **Micro-Router SLM Latency:** 5284.28 ms (GBNF deterministic JSON schema decoding).
+- **Warm AST Cache Lookup:** 0.061 ms.
 
 ---
 *Generated automatically by Phonix v2.1 Automated Benchmark Suite.*

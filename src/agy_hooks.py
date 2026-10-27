@@ -71,6 +71,11 @@ def handle_session_start(workspace_root: str = ".") -> int:
             f"{map_text}"
         )
 
+        try:
+            reset_circuit_breaker_turn_count()
+        except Exception:
+            pass
+
         output = {
             "injectSteps": [
                 {
@@ -84,6 +89,10 @@ def handle_session_start(workspace_root: str = ".") -> int:
         sys.stdout.flush()
         return 0
     except Exception as exc:
+        try:
+            reset_circuit_breaker_turn_count()
+        except Exception:
+            pass
         fallback_output = {
             "injectSteps": [
                 {
@@ -157,6 +166,31 @@ def _save_circuit_state(state: dict[str, Any]) -> None:
         pass
 
 
+def reset_circuit_breaker_turn_count() -> None:
+    """Resets the stateful Circuit Breaker turn counter and polling state."""
+    state = _load_circuit_state()
+    state["turn_count"] = 0
+    state["consecutive_same_tool_count"] = 0
+    state["last_tool_name"] = ""
+    state["last_tool_args_hash"] = ""
+    state["last_call_timestamp"] = time.time()
+    _save_circuit_state(state)
+
+
+def handle_user_prompt_submit() -> int:
+    """Executes UserPromptSubmit lifecycle hook.
+
+    Resets the stateful Circuit Breaker turn counter on every new user prompt.
+    """
+    try:
+        reset_circuit_breaker_turn_count()
+    except Exception:
+        pass
+    sys.stdout.write(json.dumps({}) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
 def handle_pre_tool_use() -> int:
     """Evaluates tool invocation against Zero-Trust policies and stateful Circuit Breaker.
 
@@ -200,7 +234,8 @@ def handle_pre_tool_use() -> int:
 
     current_args_hash = hashlib.sha256(json.dumps(args, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
-    if (now - last_call_ts) > 45.0:
+    idle_timeout = float(os.environ.get("PHONIX_CIRCUIT_IDLE_TIMEOUT", "120.0"))
+    if (now - last_call_ts) > idle_timeout:
         turn_count = 1
         consecutive_count = 1
     else:
@@ -220,9 +255,11 @@ def handle_pre_tool_use() -> int:
     _save_circuit_state(updated_state)
 
     # Rule 1 (Anti-Polling Lock)
+    is_manage_task = tool_name in ("ManageTask", "manage_task")
+    action_val = str(args.get("Action") or args.get("action") or "").lower()
     if (
-        tool_name in ("ManageTask", "manage_task")
-        and (args.get("Action") in ("status", "list") or args.get("action") in ("status", "list"))
+        is_manage_task
+        and action_val in ("status", "list")
         and consecutive_count >= 2
     ):
         response = {
@@ -246,14 +283,21 @@ def handle_pre_tool_use() -> int:
             sys.stdout.flush()
             return 0
 
-    # Rule 2 (Turn Budget Circuit Breaker)
-    if turn_count > 15:
+    # Rule 2 (Turn Budget Circuit Breaker: warn at 25, hard-deny at 40)
+    turn_warn = int(os.environ.get("PHONIX_TURN_WARN", "25"))
+    turn_max = int(os.environ.get("PHONIX_TURN_MAX", "40"))
+    if turn_count >= turn_max:
         response = {
             "decision": "deny",
-            "reason": "[Phonix Circuit Breaker Tripped] Task Turn Budget Exceeded (15 consecutive tool turns)! Summarize and report to user.",
+            "reason": (
+                f"[Phonix Circuit Breaker Tripped] Task Turn Budget Exceeded ({turn_max} consecutive tool turns)! "
+                f"Summarize and report to user."
+            ),
         }
         _notify_gateway(tool_name, args, "deny", response["reason"])
         sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()
+        return 0
         sys.stdout.flush()
         return 0
 
@@ -372,6 +416,21 @@ def handle_pre_tool_use() -> int:
                 return 0
 
     # Allow benign or verified operations
+    if turn_count >= turn_warn:
+        warning_msg = (
+            f"[Phonix Circuit Breaker Warning] Turn budget warning: turn {turn_count} reached "
+            f"(hard-deny at turn {turn_max}). Please consolidate tool actions."
+        )
+        response = {
+            "decision": "allow",
+            "note": warning_msg,
+            "reason": warning_msg,
+        }
+        _notify_gateway(tool_name, args, "allow", warning_msg)
+        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()
+        return 0
+
     _notify_gateway(tool_name, args, "allow", "Verified operation allowed.")
     sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
     sys.stdout.flush()
@@ -381,13 +440,15 @@ def handle_pre_tool_use() -> int:
 def main() -> int:
     """CLI dispatcher for Antigravity hooks."""
     if len(sys.argv) < 2:
-        print("Usage: python -m src.agy_hooks [session-start|pre-tool-use]")
+        print("Usage: python -m src.agy_hooks [session-start|user-prompt-submit|pre-tool-use]")
         return 1
 
     action = sys.argv[1].lower()
     if action in ("session-start", "session_start"):
         ws = sys.argv[2] if len(sys.argv) > 2 else "."
         return handle_session_start(ws)
+    elif action in ("user-prompt-submit", "user_prompt_submit"):
+        return handle_user_prompt_submit()
     elif action in ("pre-tool-use", "pre_tool_use"):
         return handle_pre_tool_use()
     else:

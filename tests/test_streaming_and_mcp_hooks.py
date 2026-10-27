@@ -328,18 +328,40 @@ def test_agy_lifecycle_hooks() -> None:
         sys.stdout = old_stdout
 
 
-def test_main_install_agy() -> None:
+def test_main_install_agy(tmp_path: Path) -> None:
     """Verifies that install_agy creates config files without error."""
-    code = install_agy(repo_root=_REPO_ROOT)
+    code = install_agy(repo_root=str(tmp_path))
     assert code == 0
 
     # Verify .agents/hooks.json
-    hooks_path = Path(_REPO_ROOT) / ".agents" / "hooks.json"
+    hooks_path = tmp_path / ".agents" / "hooks.json"
     assert hooks_path.is_file()
 
     # Verify .agents/rules/PhonixHP.md
-    rules_path = Path(_REPO_ROOT) / ".agents" / "rules" / "PhonixHP.md"
+    rules_path = tmp_path / ".agents" / "rules" / "PhonixHP.md"
     assert rules_path.is_file()
+
+
+def test_auto_bootstrap_opt_in_hooks(tmp_path: Path, monkeypatch: Any) -> None:
+    """Verifies that auto_bootstrap_agy_environment only writes hooks/rules when opt-in is True."""
+    fake_home = tmp_path / "home_gemini"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    from src.main import auto_bootstrap_agy_environment
+
+    # Case 1: Default (install_hooks=False) -> only MCP config, NO hooks.json or rule files
+    auto_bootstrap_agy_environment(repo_root=str(tmp_path), install_hooks=False)
+    global_mcp = fake_home / ".gemini" / "config" / "mcp_config.json"
+    assert global_mcp.is_file()
+    global_hooks = fake_home / ".gemini" / "config" / "hooks.json"
+    assert not global_hooks.exists()
+    global_rules = fake_home / ".gemini" / "config" / "rules" / "PhonixHP.md"
+    assert not global_rules.exists()
+
+    # Case 2: Opt-in (install_hooks=True) -> writes hooks.json and PhonixHP.md
+    auto_bootstrap_agy_environment(repo_root=str(tmp_path), install_hooks=True)
+    assert global_hooks.is_file()
+    assert global_rules.is_file()
 
 
 def test_fastapi_streaming_endpoint() -> None:
@@ -625,6 +647,7 @@ def test_colon_line_range_syntax_and_gmmu(tmp_path: Path) -> None:
 def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatch: Any) -> None:
     """Verifies stateful Circuit Breaker anti-polling lock and turn budget tripping."""
     import io
+    import time
     from src.agy_hooks import handle_pre_tool_use
 
     circuit_file = tmp_path / "phonix_circuit_state.json"
@@ -670,19 +693,91 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     assert r_sleep2["decision"] == "deny"
     assert "Shell sleep loops are strictly forbidden" in r_sleep2["reason"]
 
-    # 4. Turn Budget Circuit Breaker (> 15 consecutive turns)
-    # Write a state with turn_count = 15
+    # 4. Turn Budget Circuit Breaker: warn at 25, hard-deny at 40
+    # Write a state with turn_count = 24
     with open(circuit_file, "r", encoding="utf-8") as f:
         c_state = json.load(f)
-    c_state["turn_count"] = 15
+    c_state["turn_count"] = 24
     c_state["last_tool_name"] = "unrelated"
     with open(circuit_file, "w", encoding="utf-8") as f:
         json.dump(c_state, f)
 
-    # Next tool call increments turn_count to 16 (> 15) and trips the budget breaker
-    r_turn16 = invoke("unrelated_tool", {"action": "compute"})
-    assert r_turn16["decision"] == "deny"
-    assert "Task Turn Budget Exceeded (15 consecutive tool turns)" in r_turn16["reason"]
+    # Next tool call increments turn_count to 25 (warning threshold)
+    r_turn25 = invoke("unrelated_tool", {"action": "compute"})
+    assert r_turn25["decision"] == "allow"
+    assert "Turn budget warning" in r_turn25.get("note", "")
+    assert "turn 25 reached" in r_turn25.get("note", "")
+
+    # Write a state with turn_count = 39
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        c_state = json.load(f)
+    c_state["turn_count"] = 39
+    c_state["last_tool_name"] = "unrelated"
+    with open(circuit_file, "w", encoding="utf-8") as f:
+        json.dump(c_state, f)
+
+    # Next tool call increments turn_count to 40 (hard-deny threshold)
+    r_turn40 = invoke("unrelated_tool", {"action": "compute"})
+    assert r_turn40["decision"] == "deny"
+    assert "Task Turn Budget Exceeded (40 consecutive tool turns)" in r_turn40["reason"]
+
+    # 5. UserPromptSubmit resets turn_count
+    from src.agy_hooks import handle_user_prompt_submit
+
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = io.StringIO()
+        handle_user_prompt_submit()
+    finally:
+        sys.stdout = old_stdout
+
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        reset_state = json.load(f)
+    assert reset_state["turn_count"] == 0
+
+    # Next call starts clean at turn 1
+    r_fresh = invoke("unrelated_tool", {"action": "compute"})
+    assert r_fresh["decision"] == "allow"
+    assert "Turn budget warning" not in r_fresh.get("note", "")
+
+    # 6. Idle timer fallback at 120s
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        c_state = json.load(f)
+    c_state["turn_count"] = 30
+    c_state["last_call_timestamp"] = time.time() - 130.0  # > 120s idle
+    with open(circuit_file, "w", encoding="utf-8") as f:
+        json.dump(c_state, f)
+
+    r_idle = invoke("unrelated_tool", {"action": "compute"})
+    assert r_idle["decision"] == "allow"
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        c_state_after = json.load(f)
+    assert c_state_after["turn_count"] == 1
+
+    # 7. Configurable PHONIX_TURN_WARN / PHONIX_TURN_MAX
+    monkeypatch.setenv("PHONIX_TURN_WARN", "5")
+    monkeypatch.setenv("PHONIX_TURN_MAX", "8")
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        c_state = json.load(f)
+    c_state["turn_count"] = 4
+    c_state["last_call_timestamp"] = time.time()
+    with open(circuit_file, "w", encoding="utf-8") as f:
+        json.dump(c_state, f)
+
+    r_cfg_warn = invoke("unrelated_tool", {"action": "compute"})
+    assert r_cfg_warn["decision"] == "allow"
+    assert "turn 5 reached (hard-deny at turn 8)" in r_cfg_warn.get("note", "")
+
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        c_state = json.load(f)
+    c_state["turn_count"] = 7
+    c_state["last_call_timestamp"] = time.time()
+    with open(circuit_file, "w", encoding="utf-8") as f:
+        json.dump(c_state, f)
+
+    r_cfg_deny = invoke("unrelated_tool", {"action": "compute"})
+    assert r_cfg_deny["decision"] == "deny"
+    assert "Task Turn Budget Exceeded (8 consecutive tool turns)" in r_cfg_deny["reason"]
 
 
 

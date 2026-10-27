@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-brightgreen.svg)](pyproject.toml)
 [![Architecture](https://img.shields.io/badge/Architecture-Context%20MMU%20%2B%201.5B%20Micro--Router-purple.svg)](ARCHITECTURE.md)
 [![Whitepaper](https://img.shields.io/badge/Whitepaper-Technical%20Report-red.svg)](docs/WHITE_PAPER.md)
-[![Benchmark](https://img.shields.io/badge/Benchmark-98.13%25%20Tokens%20Saved-brightgreen.svg)](docs/BENCHMARK_REPORT.md)
+[![Benchmark](https://img.shields.io/badge/Benchmark-97.50%25%20Tokens%20Saved-brightgreen.svg)](docs/BENCHMARK_REPORT.md)
 
 ---
 
@@ -19,20 +19,20 @@ Tested head-to-head against vanilla agentic execution on a production 7,166-line
 
 | Evaluation Dimension | Vanilla Agent (Baseline) | Phonix v2.1 Gateway | Realized Margin | Status |
 | :--- | :---: | :---: | :---: | :---: |
-| **Context Ingestion Volume** | 147,724 tokens | **2,756 tokens** | **-98.13%** (53.6x compression) | ✅ Verified |
-| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4432 | **$0.0083** | **53.6x Cheaper** | ⚡ Realized |
+| **Context Ingestion Volume** | 147,724 tokens | **3,689 tokens** | **-97.50%** (40.04x compression) | ✅ Verified |
+| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4432 | **$0.0111** | **40.04x Cheaper** | ⚡ Realized |
 | **Agent Tool Execution Turns** | 38 turns | **3 turns** | **-92.11%** turns | ✅ Verified |
 | **Cumulative Context (Loop Inflation)** | 2,669,500 tokens | **22,500 tokens** | **-99.16%** (118.6x inflation avoided) | ⚡ Realized |
 | **CRLF Multi-Hunk Edit Success** | 0% (Mismatch failure) | **100%** (Atomic normalization) | **+100.0%** reliability | ✅ Verified |
 | **Zero-Trust Threat Interception** | 0.0% (Total leakage) | **100.0%** (20/20 blocked) | **Zero False Negatives** | 🛡️ Protected |
 | **Security False Positive Rate** | N/A | **0.0%** (10/10 allowed) | **Zero False Positives** | 🛡️ Verified |
-| **Verification Latency Overhead** | 0.00 ms | **2.47 ms** | **Deterministic (< 2.5ms)** | ⚡ Realized |
+| **Verification Latency Overhead** | 0.00 ms | **2.01 ms** | **Deterministic (< 2.5ms)** | ⚡ Realized |
 | **Hardware Memory Footprint** | Unbounded | **72.6 MB / 1,228.8 MB** | **Strict Edge Cap Satisfied** | ✅ Verified |
 
 ```text
 Context Ingestion Volume (Tokens per Read):
   Vanilla (Full Read):  [████████████████████████████████████████] 147,724 tokens
-  Phonix MMU v2.1:      [█                                       ] 2,756 tokens (-98.13%)
+  Phonix MMU v2.1:      [█                                       ] 3,689 tokens (-97.50%)
 
 Cumulative Conversational Tokens (Loop Inflation):
   Vanilla Agent Loop:   [████████████████████████████████████████] 2,669,500 tokens
@@ -51,7 +51,7 @@ Zero-Trust Threat Interception Rate:
   - **$L_3$ Fovea Verbatim Working Set** ($d=0$, `[Lines X-Y]`): 100% byte-accurate raw source lines for the focal edit window.
   - **Attention-Decay Feedback**: Post-surgical edit, the target file transitions from $L_3 \to L_1$ (`[G-MMU L3 -> L1: Committed & Verified]`), shedding method bodies while retaining structural context.
 - **Colon Line-Range Syntax**: Direct line-bounded fovea queries via `<file_path>:<start>-<end>` (e.g. `src/agy_hooks.py:130-294`).
-- **Stateful Circuit Breaker**: Active turn budget protection (> 15 turns), Anti-Polling Lock (blocks consecutive `manage_task` status/list checks $N \ge 2$), and forbidden shell sleep loops (`Start-Sleep`, `while true`, `sleep`).
+- **Stateful Circuit Breaker**: Session-aware turn budget (warn at turn 25, hard-deny at turn 40, configurable via `PHONIX_TURN_WARN`/`PHONIX_TURN_MAX`, resetting on `UserPromptSubmit` or `SessionStart` with 120s idle fallback), Anti-Polling Lock (blocks consecutive identical `manage_task` status/list checks $N \ge 2$), and forbidden shell sleep loops (`Start-Sleep`, `while true`, `sleep`).
 - **Multi-Query Data-Slug Locator**: Batch inspect file paths and data array slugs in 1 single call (`phonix_get_pruned_context(query="file.tsx | slug1 | slug2", for_edit=True)`), returning exact verbatim `[Lines X-Y]` edit windows with 100% preserved whitespace.
 - **CRLF-Safe Surgical Multi-Hunk Editor**: `phonix_surgical_edit` eliminates Windows `\r\n` vs `\n` edit mismatch loops by automatically normalizing and applying atomic multi-hunk replacements.
 - **Zero-Touch Multi-Project Auto-Discovery**: Automatically binds to foreign active repositories (`os.getcwd()`), self-injects `PhonixHP.md` Quota Armor, and guarantees zero target repository pollution via centralized vault storage.
@@ -123,7 +123,7 @@ flowchart TD
 - **Colon Line-Range Syntax**: Queries matching `<file_path>:<start>-<end>` (e.g. `src/agy_hooks.py:130-294`) parse line slices directly before disk checks.
 - **Stateful Circuit Breaker**:
   - **Anti-Polling Lock**: Blocks repeated `manage_task` status/list checks ($N \ge 2$) and shell sleep loops (`Start-Sleep`, `while true`, `sleep`).
-  - **Task Turn Budget**: Enforces a 15-turn ceiling on unattended tool loops, preventing runaway spending.
+  - **Task Turn Budget**: Enforces a session-aware turn budget (warns at turn 25, hard-denies at turn 40, configurable via `PHONIX_TURN_WARN`/`PHONIX_TURN_MAX`, resetting on `UserPromptSubmit` or `SessionStart` with 120s idle fallback), preventing runaway spending.
   - **Live Gateway Telemetry**: Exposes `circuit_breaker_trips` and `polling_loops_blocked` in `/health` and `/v1/z3/verify`.
 
 ---

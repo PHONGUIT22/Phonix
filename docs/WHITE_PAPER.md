@@ -184,22 +184,22 @@ The evaluation compares:
 
 | Metric | Vanilla Agent (Baseline) | Phonix v2.1 Context MMU | Improvement / Factor |
 | :--- | :---: | :---: | :---: |
-| **Ingested Characters** | 590,896 | **11,025** | **-98.13%** |
-| **Ingested Lines** | 7,166 | **119** | **-98.34%** |
-| **Ingested Tokens** | 147,724 | **2,756** | **-98.13%** |
-| **Tokens Saved per Read** | 0 | **144,968** | **144,968 tokens saved** |
-| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4432 | **$0.0083** | **53.60$\times$ Cheaper** |
-| **Ingestion Cost (Gemini 2.0 Flash)** | $0.1847 | **$0.0035** | **53.60$\times$ Cheaper** |
-| **Retrieval Latency** | 120 ms (disk read) | **3,453.44 ms** (AST indexing + parse) | Deterministic sub-4s |
+| **Ingested Characters** | 590,896 | **14,757** | **-97.50%** |
+| **Ingested Lines** | 7,166 | **187** | **-97.39%** |
+| **Ingested Tokens** | 147,724 | **3,689** | **-97.50%** |
+| **Tokens Saved per Read** | 0 | **144,035** | **144,035 tokens saved** |
+| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4432 | **$0.0111** | **40.04$\times$ Cheaper** |
+| **Ingestion Cost (Gemini 2.0 Flash)** | $0.1847 | **$0.0046** | **40.04$\times$ Cheaper** |
+| **Retrieval Latency** | 120 ms (disk read) | **3,176.71 ms** (AST indexing + parse) | Deterministic sub-4s |
 
 ```text
 Context Ingestion Volume (Tokens per Ingestion):
   Vanilla (Full Read):  [████████████████████████████████████████] 147,724 tokens
-  Phonix MMU v2.1:      [█                                       ] 2,756 tokens (-98.13%)
+  Phonix MMU v2.1:      [█                                       ] 3,689 tokens (-97.50%)
 ```
 
 #### Mathematical Formulation: Compression Ratio ($C_r$)
-$$C_r = \left(1 - \frac{T_{\text{Phonix}}}{T_{\text{Vanilla}}}\right) \times 100\% = \left(1 - \frac{2,756}{147,724}\right) \times 100\% = \mathbf{98.13\%}$$
+$$C_r = \left(1 - \frac{T_{\text{Phonix}}}{T_{\text{Vanilla}}}\right) \times 100\% = \left(1 - \frac{3,689}{147,724}\right) \times 100\% = \mathbf{97.50\%}$$
 
 ---
 
@@ -349,8 +349,8 @@ To mitigate these pathologies, Phonix activates an on-device stateful Circuit Br
 - **Anti-Polling Lock**: Tracks consecutive invocations of `ManageTask` / `manage_task`. If consecutive calls with `Action in ("status", "list")` reach $N \ge 2$, the breaker trips instantly with a hard deny:
   `[Phonix Circuit Breaker] Anti-Polling Lock Tripped! Consecutive ManageTask polling is blocked.`
   Similarly, shell commands matching sleep patterns (`(?i)(?:Start-Sleep|while\s+true|\bsleep\s+\d+)`) are unconditionally blocked.
-- **Task Turn Budget Circuit Breaker**: Tracks consecutive tool turns within an active session (resetting if idle $> 45\text{s}$). If `turn_count > 15`, the breaker trips:
-  `[Phonix Circuit Breaker Tripped] Task Turn Budget Exceeded (15 consecutive tool turns)! Summarize and report to user.`
+- **Task Turn Budget Circuit Breaker**: Tracks consecutive tool turns within an active session (resetting on `UserPromptSubmit` or `SessionStart`, with 120s idle fallback). At turn 25, the breaker issues a non-blocking warning note. If `turn_count >= 40` (configurable via `PHONIX_TURN_WARN` and `PHONIX_TURN_MAX`), the breaker hard-denies:
+  `[Phonix Circuit Breaker Tripped] Task Turn Budget Exceeded (40 consecutive tool turns)! Summarize and report to user.`
   This halts runaway spending and requires human-in-the-loop alignment before further quota can be consumed.
 - **Hardware Gateway Telemetry**: Every circuit breaker trip and blocked polling loop is emitted to `GatewayCore` telemetry and exposed live via `GET /health` (`circuit_breaker_trips`, `polling_loops_blocked`) and `POST /v1/z3/verify`.
 
@@ -361,7 +361,7 @@ To mitigate these pathologies, Phonix activates an on-device stateful Circuit Br
 | Capability / Architecture | Phonix v2.1 Gateway | MemGPT / Letta | Portkey AI Gateway | Cursor / Claude Code Native | LangChain / LlamaIndex |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Context Model** | **Virtual AST Paging + Multi-Query Slug Locator** | Recursive Summarization | Fixed Token Truncation | Greedy Window / Full Read | Vector Similarity RAG |
-| **Context Token Reduction** | **98.13%** | 40% – 60% | 0% – 20% | 0% (Full file reads) | 50% – 70% (Destructive) |
+| **Context Token Reduction** | **97.50%** | 40% – 60% | 0% – 20% | 0% (Full file reads) | 50% – 70% (Destructive) |
 | **Loop Inflation Avoidance** | **118.6$\times$ ($L_f$)** | None (Multiplies turns) | None | None (Trial-and-error) | None |
 | **Code Read Hard-Block** | **Yes (Active Hook)** | No | No | No | No |
 | **Windows CRLF Safe Edit** | **Yes (Atomic 1-Step)** | No | No | Partial (Regex loops) | No |

@@ -37,14 +37,17 @@ logger = logging.getLogger("phonix.main")
 app = create_gateway_app()
 
 
-def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
-    """Zero-Touch, Zero-Prompt Auto-Bootstrapper for agy IDE & CLI across all projects.
+def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT, install_hooks: bool = False) -> None:
+    """Zero-Touch Auto-Bootstrapper for agy IDE & CLI across all projects.
 
-    1. Configures global ~/.gemini/config/mcp_config.json with dynamic phonix-mmu (no hardcoded PHONIX_WORKSPACE).
-    2. Injects PhonixHP.md quota rules into global ~/.gemini/ paths & instructions.md.
-    3. Configures global hooks.json pointing to absolute agy_hooks.py.
-    4. Auto-discovers sibling projects under repo_root.parent, injects PhonixHP.md,
-       cleans stale configs, and appends .agents/ to .git/info/exclude for 0 untracked files.
+    By default (`install_hooks=False`), ONLY configures MCP server settings:
+    1. Configures global ~/.gemini/config/mcp_config.json with dynamic phonix-mmu.
+    2. Synchronizes MCP tool schemas for lazy-loading.
+    3. Auto-discovers sibling projects and ensures clean .agents/mcp_config.json.
+
+    When `install_hooks=True` (e.g. `--install-hooks` or `install-agy`):
+    - Injects PhonixHP.md quota rules into global paths and sibling repos.
+    - Configures global hooks.json and child hooks.json pointing to agy_hooks.py.
     """
     root_path = Path(repo_root).resolve()
     py_exec = sys.executable or "python"
@@ -84,23 +87,7 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
         except Exception as exc:
             logger.debug("Could not write MCP config at %s: %s", mcp_path, exc)
 
-    # 2. Global Rules & Instructions (PhonixHP.md)
-    rule_targets = [
-        home_gemini / "GEMINI.md",
-        home_gemini / "config" / "GEMINI.md",
-        home_gemini / "config" / "rules" / "PhonixHP.md",
-        home_gemini / "antigravity-cli" / "mcp" / "phonix-mmu" / "instructions.md",
-        home_gemini / "antigravity" / "mcp" / "phonix-mmu" / "instructions.md",
-    ]
-    for r_path in rule_targets:
-        try:
-            r_path.parent.mkdir(parents=True, exist_ok=True)
-            r_path.write_text(PHONIX_HP_RULE_CONTENT, encoding="utf-8")
-            logger.info("Injected PhonixHP rule to %s", r_path)
-        except Exception as exc:
-            logger.debug("Could not write rule to %s: %s", r_path, exc)
-
-    # 2b. Global Tool Schemas for agy lazy-loading
+    # 2. Global Tool Schemas for agy lazy-loading
     try:
         from src.mcp_server import PhonixMCPServer
 
@@ -122,7 +109,52 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
     except Exception as exc:
         logger.debug("Could not write MCP tool schemas: %s", exc)
 
-    # 3. Global hooks.json (~/.gemini/config/hooks.json & ~/.gemini/hooks.json)
+    # Sibling repos MCP discovery
+    parent_dir = root_path.parent
+    if parent_dir.is_dir():
+        for child in parent_dir.iterdir():
+            if not child.is_dir() or child == root_path or child.name.startswith("."):
+                continue
+
+            # Ensure clean .agents/mcp_config.json without hardcoded PHONIX_WORKSPACE
+            child_agents = child / ".agents"
+            if child_agents.is_dir():
+                child_mcp = child_agents / "mcp_config.json"
+                if child_mcp.is_file():
+                    try:
+                        with open(child_mcp, "r", encoding="utf-8") as f:
+                            c_cfg = json.load(f)
+                        if isinstance(c_cfg, dict) and "mcpServers" in c_cfg:
+                            if "phonix-mmu" in c_cfg["mcpServers"]:
+                                c_cfg["mcpServers"]["phonix-mmu"].pop("cwd", None)
+                                if "env" in c_cfg["mcpServers"]["phonix-mmu"]:
+                                    c_cfg["mcpServers"]["phonix-mmu"]["env"].pop("PHONIX_WORKSPACE", None)
+                                with open(child_mcp, "w", encoding="utf-8") as f:
+                                    json.dump(c_cfg, f, indent=2)
+                    except Exception:
+                        pass
+
+    # Optional hook and global rule file installation (only if opt-in flag is set)
+    if not install_hooks:
+        return
+
+    # 3. Global Rules & Instructions (PhonixHP.md)
+    rule_targets = [
+        home_gemini / "GEMINI.md",
+        home_gemini / "config" / "GEMINI.md",
+        home_gemini / "config" / "rules" / "PhonixHP.md",
+        home_gemini / "antigravity-cli" / "mcp" / "phonix-mmu" / "instructions.md",
+        home_gemini / "antigravity" / "mcp" / "phonix-mmu" / "instructions.md",
+    ]
+    for r_path in rule_targets:
+        try:
+            r_path.parent.mkdir(parents=True, exist_ok=True)
+            r_path.write_text(PHONIX_HP_RULE_CONTENT, encoding="utf-8")
+            logger.info("Injected PhonixHP rule to %s", r_path)
+        except Exception as exc:
+            logger.debug("Could not write rule to %s: %s", r_path, exc)
+
+    # 4. Global hooks.json (~/.gemini/config/hooks.json & ~/.gemini/hooks.json)
     py_exec_str = f'"{py_exec}"' if " " in str(py_exec) else str(py_exec)
     hooks_script_str = f'"{hooks_script}"' if " " in str(hooks_script) else str(hooks_script)
     hooks_payload = {
@@ -135,9 +167,16 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
                     "timeout": 10,
                 }
             ],
+            "UserPromptSubmit": [
+                {
+                    "type": "command",
+                    "command": f"{py_exec_str} {hooks_script_str} user-prompt-submit",
+                    "timeout": 5,
+                }
+            ],
             "PreToolUse": [
                 {
-                    "matcher": "read_file|view_file|read_file_lines|run_command",
+                    "matcher": "read_file|view_file|read_file_lines|run_command|ManageTask|manage_task|Bash|bash|execute_command",
                     "hooks": [
                         {
                             "type": "command",
@@ -158,8 +197,7 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
         except Exception as exc:
             logger.debug("Could not write hooks to %s: %s", hk_path, exc)
 
-    # 4. Sibling repos auto-discovery & injection
-    parent_dir = root_path.parent
+    # 5. Sibling repos rule & hooks injection
     if parent_dir.is_dir():
         for child in parent_dir.iterdir():
             if not child.is_dir() or child == root_path or child.name.startswith("."):
@@ -168,25 +206,8 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
             # Ensure .agents/rules/PhonixHP.md and .git/info/exclude
             _ensure_phonix_hp_rule(child)
 
-            # Ensure clean .agents/mcp_config.json without hardcoded PHONIX_WORKSPACE
             child_agents = child / ".agents"
             if child_agents.is_dir():
-                child_mcp = child_agents / "mcp_config.json"
-                if child_mcp.is_file():
-                    try:
-                        with open(child_mcp, "r", encoding="utf-8") as f:
-                            c_cfg = json.load(f)
-                        if isinstance(c_cfg, dict) and "mcpServers" in c_cfg:
-                            if "phonix-mmu" in c_cfg["mcpServers"]:
-                                c_cfg["mcpServers"]["phonix-mmu"].pop("cwd", None)
-                                if "env" in c_cfg["mcpServers"]["phonix-mmu"]:
-                                    c_cfg["mcpServers"]["phonix-mmu"]["env"].pop("PHONIX_WORKSPACE", None)
-                                with open(child_mcp, "w", encoding="utf-8") as f:
-                                    json.dump(c_cfg, f, indent=2)
-                    except Exception:
-                        pass
-
-                # Child hooks.json with absolute script path
                 child_hooks = child_agents / "hooks.json"
                 try:
                     with open(child_hooks, "w", encoding="utf-8") as f:
@@ -195,9 +216,14 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT) -> None:
                     pass
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8000, reload: bool = False) -> None:
+def run_server(
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    reload: bool = False,
+    install_hooks: bool = False,
+) -> None:
     """Launches the Phonix v2.0 FastAPI Gateway using Uvicorn."""
-    auto_bootstrap_agy_environment()
+    auto_bootstrap_agy_environment(install_hooks=install_hooks)
     try:
         import uvicorn  # type: ignore
 
@@ -256,33 +282,32 @@ def install_agy(repo_root: str = _REPO_ROOT) -> int:
     print(" Installing Phonix v2.0 Quota-Saver Suite for Antigravity CLI")
     print("=" * 60)
 
-    # Run complete zero-touch environment bootstrap
-    auto_bootstrap_agy_environment(repo_root=repo_root)
+    # Run complete zero-touch environment bootstrap with hooks opt-in enabled
+    auto_bootstrap_agy_environment(repo_root=repo_root, install_hooks=True)
 
     # 1. Register in global ~/.gemini/config/mcp_config.json
     global_mcp_path = Path.home() / ".gemini" / "config" / "mcp_config.json"
-    global_mcp_path.parent.mkdir(parents=True, exist_ok=True)
-
-    config_data: dict[str, Any] = {"mcpServers": {}}
-    if global_mcp_path.is_file():
-        try:
-            with open(global_mcp_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    config_data = loaded
-        except Exception as exc:
-            logger.warning("Could not parse existing %s: %s", global_mcp_path, exc)
-
-    if "mcpServers" not in config_data or not isinstance(config_data["mcpServers"], dict):
-        config_data["mcpServers"] = {}
-
-    config_data["mcpServers"]["phonix-mmu"] = {
-        "command": sys.executable,
-        "args": ["-m", "src.mcp_server"],
-        "env": {"PYTHONPATH": repo_root},
-    }
-
     try:
+        global_mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        config_data: dict[str, Any] = {"mcpServers": {}}
+        if global_mcp_path.is_file():
+            try:
+                with open(global_mcp_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        config_data = loaded
+            except Exception as exc:
+                logger.warning("Could not parse existing %s: %s", global_mcp_path, exc)
+
+        if "mcpServers" not in config_data or not isinstance(config_data["mcpServers"], dict):
+            config_data["mcpServers"] = {}
+
+        config_data["mcpServers"]["phonix-mmu"] = {
+            "command": sys.executable,
+            "args": ["-m", "src.mcp_server"],
+            "env": {"PYTHONPATH": repo_root},
+        }
+
         with open(global_mcp_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
         print(f" [PASS] Registered 'phonix-mmu' in {global_mcp_path}")
@@ -291,28 +316,28 @@ def install_agy(repo_root: str = _REPO_ROOT) -> int:
 
     # 2. Register in workspace .agents/mcp_config.json
     agents_dir = Path(repo_root) / ".agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    local_mcp_path = agents_dir / "mcp_config.json"
-    local_config: dict[str, Any] = {"mcpServers": {}}
-    if local_mcp_path.is_file():
-        try:
-            with open(local_mcp_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    local_config = loaded
-        except Exception as exc:
-            logger.warning("Could not parse existing %s: %s", local_mcp_path, exc)
-
-    if "mcpServers" not in local_config or not isinstance(local_config["mcpServers"], dict):
-        local_config["mcpServers"] = {}
-
-    local_config["mcpServers"]["phonix-mmu"] = {
-        "command": sys.executable,
-        "args": ["-m", "src.mcp_server"],
-        "env": {"PYTHONPATH": repo_root},
-    }
-
     try:
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        local_mcp_path = agents_dir / "mcp_config.json"
+        local_config: dict[str, Any] = {"mcpServers": {}}
+        if local_mcp_path.is_file():
+            try:
+                with open(local_mcp_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        local_config = loaded
+            except Exception as exc:
+                logger.warning("Could not parse existing %s: %s", local_mcp_path, exc)
+
+        if "mcpServers" not in local_config or not isinstance(local_config["mcpServers"], dict):
+            local_config["mcpServers"] = {}
+
+        local_config["mcpServers"]["phonix-mmu"] = {
+            "command": sys.executable,
+            "args": ["-m", "src.mcp_server"],
+            "env": {"PYTHONPATH": repo_root},
+        }
+
         with open(local_mcp_path, "w", encoding="utf-8") as f:
             json.dump(local_config, f, indent=2)
         print(f" [PASS] Registered 'phonix-mmu' in {local_mcp_path}")
@@ -321,41 +346,61 @@ def install_agy(repo_root: str = _REPO_ROOT) -> int:
 
     # 3. Verify .agents/hooks.json
     hooks_file = agents_dir / "hooks.json"
-    if not hooks_file.exists():
-        hooks_content = {
-            "phonix-quota-and-security-gate": {
-                "enabled": True,
-                "SessionStart": [
-                    {
-                        "type": "command",
-                        "command": "python -m src.agy_hooks session-start",
-                        "timeout": 10,
-                    }
-                ],
-                "PreToolUse": [
-                    {
-                        "matcher": "read_file|view_file|run_command",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": "python -m src.agy_hooks pre-tool-use",
-                                "timeout": 5,
-                            }
-                        ],
-                    }
-                ],
-            }
+    hooks_content = {
+        "phonix-quota-and-security-gate": {
+            "enabled": True,
+            "SessionStart": [
+                {
+                    "type": "command",
+                    "command": "python -m src.agy_hooks session-start",
+                    "timeout": 10,
+                }
+            ],
+            "UserPromptSubmit": [
+                {
+                    "type": "command",
+                    "command": "python -m src.agy_hooks user-prompt-submit",
+                    "timeout": 5,
+                }
+            ],
+            "PreToolUse": [
+                {
+                    "matcher": "read_file|view_file|read_file_lines|run_command|ManageTask|manage_task|Bash|bash|execute_command",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python -m src.agy_hooks pre-tool-use",
+                            "timeout": 5,
+                        }
+                    ],
+                }
+            ],
         }
-        with open(hooks_file, "w", encoding="utf-8") as f:
-            json.dump(hooks_content, f, indent=2)
-    print(f" [PASS] Verified hooks configuration at {hooks_file}")
+    }
+    try:
+        if not hooks_file.exists():
+            with open(hooks_file, "w", encoding="utf-8") as f:
+                json.dump(hooks_content, f, indent=2)
+        print(f" [PASS] Verified hooks configuration at {hooks_file}")
+    except Exception as exc:
+        print(f" [WARN] Could not write {hooks_file}: {exc}")
 
     # 4. Verify .agents/rules/PhonixHP.md
     rules_dir = agents_dir / "rules"
-    rules_dir.mkdir(parents=True, exist_ok=True)
     rules_file = rules_dir / "PhonixHP.md"
-    _ensure_phonix_hp_rule(repo_root)
-    print(f" [PASS] Verified quota preservation rules at {rules_file}")
+    try:
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_phonix_hp_rule(repo_root)
+        print(f" [PASS] Verified quota preservation rules at {rules_file}")
+    except Exception as exc:
+        print(f" [WARN] Could not write {rules_file}: {exc}")
+
+    print("=" * 60)
+    print(" Phonix v2.0 Quota-Saver Suite successfully installed!")
+    print(" Antigravity CLI will now automatically route code inspections")
+    print(" through the Context MMU to preserve Five Hour & Weekly Limit quotas.")
+    print("=" * 60)
+    return 0
 
     print("=" * 60)
     print(" Phonix v2.0 Quota-Saver Suite successfully installed!")
@@ -516,6 +561,11 @@ def cli_entrypoint() -> None:
     start_parser.add_argument("--host", default="0.0.0.0", help="Binding host IP")
     start_parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
     start_parser.add_argument("--reload", action="store_true", help="Enable hot reload")
+    start_parser.add_argument(
+        "--install-hooks",
+        action="store_true",
+        help="Opt-in: install global hooks.json and rules files into agy environment",
+    )
 
     # status command
     subparsers.add_parser("status", help="Display hardware profile and engine status")
@@ -559,7 +609,12 @@ def cli_entrypoint() -> None:
     args = parser.parse_args()
 
     if args.command == "start":
-        run_server(host=args.host, port=args.port, reload=args.reload)
+        run_server(
+            host=args.host,
+            port=args.port,
+            reload=args.reload,
+            install_hooks=args.install_hooks,
+        )
     elif args.command == "status":
         show_status()
     elif args.command == "verify-policy":

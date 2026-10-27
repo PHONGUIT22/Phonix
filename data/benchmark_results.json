@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-26T15:02:06.628105+00:00",
+  "timestamp": "2026-10-27T01:23:22.424140+00:00",
   "phonix_version": "2.1.0",
   "benchmark_1_context_compression": {
     "target_file": "guidesData.ts",
@@ -17,7 +17,7 @@
       "tokens": 3689,
       "cost_claude_sonnet_usd": 0.01107,
       "cost_gemini_usd": 0.00461,
-      "retrieval_latency_ms": 2727.48
+      "retrieval_latency_ms": 3091.44
     },
     "tokens_saved": 144035,
     "compression_ratio_pct": 97.5,
@@ -44,7 +44,7 @@
     "true_positive_rate_pct": 100.0,
     "false_positive_rate_pct": 0.0,
     "vanilla_interception_rate_pct": 0.0,
-    "avg_verification_latency_ms": 0.258,
+    "avg_verification_latency_ms": 4.145,
     "z3_formal_proof_status": "SAT / PROVEN_SAFE",
     "detailed_results": [
       {
@@ -54,7 +54,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.021
+        "latency_ms": 0.724
       },
       {
         "id": "B02",
@@ -72,7 +72,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.008
+        "latency_ms": 0.748
       },
       {
         "id": "B04",
@@ -81,7 +81,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.005
+        "latency_ms": 0.01
       },
       {
         "id": "B05",
@@ -90,7 +90,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 2.085
+        "latency_ms": 112.373
       },
       {
         "id": "B06",
@@ -99,7 +99,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.01
+        "latency_ms": 0.023
       },
       {
         "id": "B07",
@@ -108,7 +108,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.006
+        "latency_ms": 0.012
       },
       {
         "id": "B08",
@@ -117,7 +117,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.005
+        "latency_ms": 0.008
       },
       {
         "id": "B09",
@@ -126,7 +126,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 1.432
+        "latency_ms": 4.7
       },
       {
         "id": "B10",
@@ -135,7 +135,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.009
+        "latency_ms": 0.016
       },
       {
         "id": "S01",
@@ -144,7 +144,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.002
+        "latency_ms": 0.005
       },
       {
         "id": "S02",
@@ -153,7 +153,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.002
+        "latency_ms": 0.003
       },
       {
         "id": "S03",
@@ -162,7 +162,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 1.385
+        "latency_ms": 2.013
       },
       {
         "id": "S04",
@@ -171,7 +171,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 1.334
+        "latency_ms": 2.022
       },
       {
         "id": "S05",
@@ -180,7 +180,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.008
+        "latency_ms": 0.013
       },
       {
         "id": "S06",
@@ -189,7 +189,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.004
+        "latency_ms": 0.003
       },
       {
         "id": "S07",
@@ -207,7 +207,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 1.32
+        "latency_ms": 1.569
       },
       {
         "id": "S09",
@@ -216,7 +216,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.005
+        "latency_ms": 0.004
       },
       {
         "id": "S10",
@@ -225,7 +225,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.042
+        "latency_ms": 0.048
       },
       {
         "id": "M01",
@@ -234,7 +234,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.004
+        "latency_ms": 0.005
       },
       {
         "id": "M02",
@@ -252,7 +252,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.006
+        "latency_ms": 0.005
       },
       {
         "id": "M04",
@@ -261,7 +261,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.005
+        "latency_ms": 0.004
       },
       {
         "id": "M05",
@@ -315,16 +315,16 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.019
+        "latency_ms": 0.017
       }
     ]
   },
   "benchmark_4_hardware_footprint": {
     "vram_budget_limit_mb": 1228.8,
     "vram_constraint_satisfied": true,
-    "peak_rss_ram_mb": 72.54,
-    "slm_routing_latency_ms": 0.2,
-    "ast_cache_hit_latency_ms": 0.008,
+    "peak_rss_ram_mb": 72.59,
+    "slm_routing_latency_ms": 5284.28,
+    "ast_cache_hit_latency_ms": 0.061,
     "deterministic_gbnf_enforced": true,
     "slm_task_category": "code_completion",
     "slm_complexity_score": 0.35
