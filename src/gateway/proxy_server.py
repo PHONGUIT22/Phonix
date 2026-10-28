@@ -216,7 +216,53 @@ def _ensure_phonix_hp_rule(workspace_root: str | Path) -> bool:
         return False
 
 
+def _clean_phonix_hp_rule(workspace_root: str | Path) -> bool:
+    """Removes <workspace_root>/.agents/rules/PhonixHP.md and cleans up Phonix markers from .git/info/exclude."""
+    try:
+        ws_path = Path(workspace_root).resolve()
+        rules_file = ws_path / ".agents" / "rules" / "PhonixHP.md"
+        if rules_file.is_file():
+            rules_file.unlink(missing_ok=True)
+            logger.info("Removed PhonixHP.md quota rule from %s", rules_file)
+            rules_dir = ws_path / ".agents" / "rules"
+            try:
+                if rules_dir.is_dir() and not any(rules_dir.iterdir()):
+                    rules_dir.rmdir()
+            except Exception:
+                pass
+
+        # Clean Phonix markers from .git/info/exclude if git repository exists
+        git_exclude = ws_path / ".git" / "info" / "exclude"
+        if git_exclude.is_file():
+            try:
+                content = git_exclude.read_text(encoding="utf-8")
+                lines = content.splitlines()
+                cleaned_lines = [
+                    l for l in lines
+                    if l.strip() not in (
+                        "# Phonix Quota Armor & MCP Gate (auto-injected)",
+                        ".agents/",
+                        ".agents/*",
+                    )
+                ]
+                new_content = "\n".join(cleaned_lines)
+                if new_content != content:
+                    git_exclude.write_text(
+                        new_content + ("\n" if new_content and not new_content.endswith("\n") else ""),
+                        encoding="utf-8",
+                    )
+                    logger.info("Cleaned Phonix markers from %s", git_exclude)
+            except Exception as e_clean:
+                logger.debug("Could not clean .git/info/exclude: %s", e_clean)
+
+        return True
+    except Exception as exc:
+        logger.debug("Failed cleaning PhonixHP rule in %s: %s", workspace_root, exc)
+        return False
+
+
 ensure_phonix_hp_rule = _ensure_phonix_hp_rule
+clean_phonix_hp_rule = _clean_phonix_hp_rule
 
 
 # --- Core Gateway Pipeline Controller ---
@@ -335,22 +381,7 @@ class GatewayCore:
             logger.warning("Workspace root '%s' does not exist. Skipping index.", root_dir)
             return 0
 
-        # Auto-inject PhonixHP.md quota armor into target workspace
-        _ensure_phonix_hp_rule(root_dir)
-
-        # Auto-sanitize foreign workspace: eliminate target workspace pollution
-        try:
-            ws_resolved = Path(root_dir).resolve()
-            if ws_resolved != PHONIX_REPO_ROOT:
-                legacy_moat = ws_resolved / "private_moat"
-                if legacy_moat.exists():
-                    import shutil
-
-                    shutil.rmtree(legacy_moat, ignore_errors=True)
-                    logger.info("Auto-sanitized foreign workspace: removed legacy '%s'", legacy_moat)
-        except Exception as e_clean:
-            logger.debug("Failed auto-sanitizing legacy private_moat in '%s': %s", root_dir, e_clean)
-
+        # Strict Read-Only Indexing: 0 bytes written to disk, 0 file or folder modifications
         for dirpath, dirnames, filenames in os.walk(root_dir):
             # Prune ignored directories in-place so os.walk does not recurse into them
             dirnames[:] = [
@@ -836,27 +867,157 @@ class GatewayCore:
         return chunks
 
 
-def create_gateway_app(workspace_root: str = ".") -> Any:
+def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> Any:
     """Factory creating the FastAPI application instance."""
     try:
         from fastapi import FastAPI, HTTPException  # type: ignore
-        from fastapi.responses import JSONResponse  # type: ignore
+        from fastapi.responses import HTMLResponse, JSONResponse  # type: ignore
     except ImportError:
         logger.warning("FastAPI not installed. Returning proxy core container.")
-        return GatewayCore(workspace_root=workspace_root, auto_index=True)
+        return GatewayCore(workspace_root=workspace_root, auto_index=auto_index)
 
     app = FastAPI(
         title="Phonix v2.0 Gateway",
-        description="Zero-Trust AST Paging & 1B Micro-Router Gateway",
+        description="Zero-Trust AST Paging & 1.5B Micro-Router Gateway",
         version="2.0.0",
     )
-    core = GatewayCore(workspace_root=workspace_root, auto_index=True)
+    core = GatewayCore(workspace_root=workspace_root, auto_index=auto_index)
     app.state.core = core
+    app.state.workspaces: dict[str, GatewayCore] = {}
+    if auto_index and os.path.isdir(workspace_root):
+        app.state.workspaces[str(Path(workspace_root).resolve())] = core
 
     # Shared PhonixMCPServer instance for HTTP daemon reuse and multi-project cache
     from src.mcp_server import PhonixMCPServer
 
     mcp_daemon = PhonixMCPServer(core=core, in_http_daemon=True)
+    app.state.mcp_daemon = mcp_daemon
+
+    from src.gateway.dashboard import render_dashboard_html
+
+    @app.get("/", response_class=HTMLResponse)
+    @app.get("/dashboard", response_class=HTMLResponse)
+    async def get_dashboard() -> HTMLResponse:
+        """Serves the interactive Phonix v2.0 Mini Web UI Dashboard."""
+        return HTMLResponse(content=render_dashboard_html(), status_code=200)
+
+    @app.get("/v1/workspaces")
+    async def list_workspaces() -> list[dict[str, Any]]:
+        """Returns JSON list of attached workspaces with status, files, and AST frames."""
+        result: list[dict[str, Any]] = []
+        for path_str, ws_core in app.state.workspaces.items():
+            p = Path(path_str)
+            rule_exists = (p / ".agents" / "rules" / "PhonixHP.md").is_file()
+            result.append({
+                "workspace_path": path_str,
+                "name": p.name or path_str,
+                "status": "rule_injected" if rule_exists else "read_only",
+                "mode": "Protected" if rule_exists else "Read-Only (0-Byte)",
+                "indexed_files": ws_core.file_trie.total_files,
+                "ast_frames": len(ws_core._frame_registry),
+            })
+        return result
+
+    @app.post("/v1/workspace/attach")
+    async def attach_workspace_api(payload: dict[str, Any]) -> dict[str, Any]:
+        """Explicitly attaches and indexes a workspace in RAM without writing any files (0-byte footprint)."""
+        ws_raw = str(payload.get("workspace_path", "")).strip().strip("'\"")
+        if not ws_raw:
+            raise HTTPException(status_code=400, detail="workspace_path is required.")
+
+        target_path = Path(ws_raw).resolve()
+        if not target_path.is_dir():
+            raise HTTPException(
+                status_code=400, detail=f"Target directory '{target_path}' does not exist or is not a directory."
+            )
+
+        path_str = str(target_path)
+        ws_core = GatewayCore(workspace_root=path_str, auto_index=True)
+        app.state.workspaces[path_str] = ws_core
+        mcp_daemon._workspace_cores[path_str] = ws_core
+
+        rule_exists = (target_path / ".agents" / "rules" / "PhonixHP.md").is_file()
+        file_count = ws_core.file_trie.total_files
+        frame_count = len(ws_core._frame_registry)
+        logger.info("Explicitly attached workspace '%s' (Read-Only: %d files, %d frames)", target_path.name, file_count, frame_count)
+
+        return {
+            "status": "success",
+            "workspace_path": path_str,
+            "name": target_path.name,
+            "mode": "rule_injected" if rule_exists else "read_only",
+            "indexed_files": file_count,
+            "ast_frames": frame_count,
+            "message": f"Successfully attached '{target_path.name}' (Read-Only: {file_count} files, {frame_count} AST frames in RAM, 0 bytes written to disk).",
+        }
+
+    @app.post("/v1/workspace/inject-rule")
+    async def inject_rule_api(payload: dict[str, Any]) -> dict[str, Any]:
+        """Explicitly drops exactly one file (.agents/rules/PhonixHP.md) into the target workspace."""
+        ws_raw = str(payload.get("workspace_path", "")).strip().strip("'\"")
+        if not ws_raw:
+            raise HTTPException(status_code=400, detail="workspace_path is required.")
+
+        target_path = Path(ws_raw).resolve()
+        if not target_path.is_dir():
+            raise HTTPException(
+                status_code=400, detail=f"Target directory '{target_path}' does not exist or is not a directory."
+            )
+
+        path_str = str(target_path)
+        ok = _ensure_phonix_hp_rule(target_path)
+        rule_file = target_path / ".agents" / "rules" / "PhonixHP.md"
+        if not ok or not rule_file.is_file():
+            raise HTTPException(status_code=500, detail=f"Failed deploying rule to '{target_path}'.")
+
+        logger.info("User explicitly injected PhonixHP.md into '%s'", target_path.name)
+        return {
+            "status": "success",
+            "workspace_path": path_str,
+            "rule_path": str(rule_file),
+            "mode": "rule_injected",
+            "message": f"Successfully deployed PhonixHP.md quota rule to '{rule_file}'.",
+        }
+
+    @app.post("/v1/workspace/clean-rule")
+    async def clean_rule_api(payload: dict[str, Any]) -> dict[str, Any]:
+        """Removes .agents/rules/PhonixHP.md and cleans up Phonix markers from .git/info/exclude."""
+        ws_raw = str(payload.get("workspace_path", "")).strip().strip("'\"")
+        if not ws_raw:
+            raise HTTPException(status_code=400, detail="workspace_path is required.")
+
+        target_path = Path(ws_raw).resolve()
+        if not target_path.is_dir():
+            raise HTTPException(
+                status_code=400, detail=f"Target directory '{target_path}' does not exist or is not a directory."
+            )
+
+        path_str = str(target_path)
+        _clean_phonix_hp_rule(target_path)
+        logger.info("User explicitly cleaned PhonixHP.md from '%s'", target_path.name)
+        return {
+            "status": "success",
+            "workspace_path": path_str,
+            "mode": "read_only",
+            "message": f"Successfully revoked PhonixHP.md and sanitized git exclude from '{target_path.name}'.",
+        }
+
+    @app.post("/v1/workspace/detach")
+    async def detach_workspace_api(payload: dict[str, Any]) -> dict[str, Any]:
+        """Detaches a workspace from active memory."""
+        ws_raw = str(payload.get("workspace_path", "")).strip().strip("'\"")
+        if not ws_raw:
+            raise HTTPException(status_code=400, detail="workspace_path is required.")
+
+        target_path = str(Path(ws_raw).resolve())
+        app.state.workspaces.pop(target_path, None)
+        mcp_daemon._workspace_cores.pop(target_path, None)
+        logger.info("Detached workspace '%s' from RAM", Path(target_path).name)
+        return {
+            "status": "success",
+            "workspace_path": target_path,
+            "message": f"Successfully detached '{Path(target_path).name}' from memory.",
+        }
 
     @app.get("/health")
     async def health_check() -> dict[str, Any]:

@@ -343,25 +343,22 @@ def test_main_install_agy(tmp_path: Path) -> None:
 
 
 def test_auto_bootstrap_opt_in_hooks(tmp_path: Path, monkeypatch: Any) -> None:
-    """Verifies that auto_bootstrap_agy_environment only writes hooks/rules when opt-in is True."""
+    """Verifies that auto_bootstrap_agy_environment is read-only by default and never touches global root."""
     fake_home = tmp_path / "home_gemini"
     monkeypatch.setattr(Path, "home", lambda: fake_home)
 
     from src.main import auto_bootstrap_agy_environment
 
-    # Case 1: Default (install_hooks=False) -> only MCP config, NO hooks.json or rule files
+    # Case 1: Default (install_hooks=False) -> strictly read-only, NO files written anywhere
     auto_bootstrap_agy_environment(repo_root=str(tmp_path), install_hooks=False)
-    global_mcp = fake_home / ".gemini" / "config" / "mcp_config.json"
-    assert global_mcp.is_file()
-    global_hooks = fake_home / ".gemini" / "config" / "hooks.json"
-    assert not global_hooks.exists()
-    global_rules = fake_home / ".gemini" / "config" / "rules" / "PhonixHP.md"
-    assert not global_rules.exists()
+    assert not fake_home.exists()
+    assert not (tmp_path / ".agents").exists()
 
-    # Case 2: Opt-in (install_hooks=True) -> writes hooks.json and PhonixHP.md
+    # Case 2: Opt-in (install_hooks=True) -> writes local workspace MCP config only, NEVER touches ~/.gemini
     auto_bootstrap_agy_environment(repo_root=str(tmp_path), install_hooks=True)
-    assert global_hooks.is_file()
-    assert global_rules.is_file()
+    local_mcp = tmp_path / ".agents" / "mcp_config.json"
+    assert local_mcp.is_file()
+    assert not fake_home.exists()
 
 
 def test_fastapi_streaming_endpoint() -> None:
@@ -523,30 +520,101 @@ def test_v21_multi_query_and_surgical_edit(tmp_path: Path) -> None:
 
 
 def test_foreign_workspace_auto_sanitization(tmp_path: Path) -> None:
-    """Verifies that indexing a foreign workspace cleans legacy private_moat and centralizes vault."""
+    """Verifies that indexing an external workspace is 100% read-only (0 bytes written, 0 files deleted)."""
     foreign_repo = tmp_path / "mock-foreign-repo"
     foreign_repo.mkdir(parents=True, exist_ok=True)
 
-    # 1. Simulate legacy private_moat artifact in foreign workspace
+    # 1. Simulate existing files in foreign workspace
     legacy_moat = foreign_repo / "private_moat"
     legacy_moat.mkdir(parents=True, exist_ok=True)
     (legacy_moat / "stale.json").write_text("{}", encoding="utf-8")
+    (foreign_repo / "main.py").write_text("print('hello')", encoding="utf-8")
     assert legacy_moat.exists()
 
-    # Indexing must automatically sanitize foreign workspace
+    # Indexing must NOT mutate foreign files or auto-inject rule
     core = GatewayCore(workspace_root=str(foreign_repo), auto_index=True)
-    assert not legacy_moat.exists()
+    assert legacy_moat.exists()
+    assert (legacy_moat / "stale.json").exists()
+    assert not (foreign_repo / ".agents" / "rules" / "PhonixHP.md").exists()
 
     # 2. BehavioralHotspotEngine must target central vault, never foreign workspace
     try:
         from private_moat.behavioral_hotspot_engine import BehavioralHotspotEngine, PHONIX_REPO_ROOT
 
         engine = BehavioralHotspotEngine(workspace_root=str(foreign_repo))
-        assert not (foreign_repo / "private_moat").exists()
         assert engine.vault_dir == PHONIX_REPO_ROOT / "private_moat" / "vault"
         assert engine.graph_filename == "mock-foreign-repo_behavioral_graph.json"
     except ImportError:
         pass
+
+
+def test_workspace_management_and_dashboard_routes(tmp_path: Path) -> None:
+    """Verifies the explicit workspace management APIs and Mini Web Dashboard."""
+    def run_coro(coro: Any) -> Any:
+        try:
+            coro.send(None)
+        except StopIteration as exc:
+            return exc.value
+        raise RuntimeError("Coroutine did not finish synchronously.")
+
+    app = create_gateway_app(workspace_root=str(tmp_path), auto_index=False)
+    routes = {r.path: r.endpoint for r in app.routes if hasattr(r, "path")}
+
+    # 1. Verify GET / and GET /dashboard render the HTML SPA
+    assert "/" in routes
+    assert "/dashboard" in routes
+    resp_root = run_coro(routes["/"]())
+    assert resp_root.status_code == 200
+    assert "text/html" in resp_root.headers.get("content-type", "")
+    assert "Phonix v2.0 Gateway Control Center" in resp_root.body.decode("utf-8")
+
+    resp_dash = run_coro(routes["/dashboard"]())
+    assert resp_dash.status_code == 200
+
+    # 2. Verify GET /v1/workspaces initially empty (auto_index=False)
+    assert "/v1/workspaces" in routes
+    ws_list = run_coro(routes["/v1/workspaces"]())
+    assert isinstance(ws_list, list)
+
+    # 3. Create a mock external project to attach
+    external_ws = tmp_path / "mock-external-proj"
+    external_ws.mkdir(parents=True, exist_ok=True)
+    (external_ws / "service.py").write_text("class Service:\n    def run(self):\n        pass\n", encoding="utf-8")
+
+    # 4. POST /v1/workspace/attach (Strictly Read-Only, 0 bytes written to disk)
+    assert "/v1/workspace/attach" in routes
+    attach_res = run_coro(routes["/v1/workspace/attach"]({"workspace_path": str(external_ws)}))
+    assert attach_res["status"] == "success"
+    assert attach_res["indexed_files"] >= 1
+    assert attach_res["mode"] == "read_only"
+    # Verify no rule was injected during attach
+    assert not (external_ws / ".agents" / "rules" / "PhonixHP.md").exists()
+
+    # Workspace now shows up in list_workspaces
+    ws_list_after = run_coro(routes["/v1/workspaces"]())
+    assert len(ws_list_after) >= 1
+    target_entry = next((w for w in ws_list_after if w["workspace_path"] == str(external_ws.resolve())), None)
+    assert target_entry is not None
+    assert target_entry["status"] == "read_only"
+
+    # 5. POST /v1/workspace/inject-rule (Explicit opt-in)
+    assert "/v1/workspace/inject-rule" in routes
+    inject_res = run_coro(routes["/v1/workspace/inject-rule"]({"workspace_path": str(external_ws)}))
+    assert inject_res["status"] == "success"
+    rule_file = external_ws / ".agents" / "rules" / "PhonixHP.md"
+    assert rule_file.is_file()
+
+    # 6. POST /v1/workspace/clean-rule (Explicit revocation)
+    assert "/v1/workspace/clean-rule" in routes
+    clean_res = run_coro(routes["/v1/workspace/clean-rule"]({"workspace_path": str(external_ws)}))
+    assert clean_res["status"] == "success"
+    assert not rule_file.exists()
+
+    # 7. POST /v1/workspace/detach
+    assert "/v1/workspace/detach" in routes
+    detach_res = run_coro(routes["/v1/workspace/detach"]({"workspace_path": str(external_ws)}))
+    assert detach_res["status"] == "success"
+    assert str(external_ws.resolve()) not in app.state.workspaces
 
 
 def test_benchmark_suite_runs() -> None:

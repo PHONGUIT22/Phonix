@@ -17,7 +17,7 @@ import sys
 from typing import Any
 
 from src.gateway.policy_engine import PolicyRequest
-from src.gateway.proxy_server import GatewayCore, _ensure_phonix_hp_rule
+from src.gateway.proxy_server import GatewayCore
 
 logger = logging.getLogger("phonix.mcp")
 
@@ -58,7 +58,6 @@ class PhonixMCPServer:
                 else:
                     workspace_root = str(Path(__file__).resolve().parent.parent)
             self.workspace_root = str(Path(workspace_root).resolve())
-            _ensure_phonix_hp_rule(self.workspace_root)
             self.core = GatewayCore(workspace_root=self.workspace_root, auto_index=True)
         self._workspace_cores: dict[str, GatewayCore] = {
             os.path.abspath(self.workspace_root): self.core
@@ -90,7 +89,6 @@ class PhonixMCPServer:
     def _get_or_create_core(self, ws_path: str) -> GatewayCore:
         norm = os.path.abspath(ws_path)
         if norm not in self._workspace_cores:
-            _ensure_phonix_hp_rule(norm)
             self._workspace_cores[norm] = GatewayCore(workspace_root=norm, auto_index=True)
         return self._workspace_cores[norm]
 
