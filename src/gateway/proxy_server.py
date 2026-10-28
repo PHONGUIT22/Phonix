@@ -19,6 +19,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import sys
 import time
 from typing import Any, AsyncIterator
 import uuid
@@ -255,14 +256,99 @@ def _clean_phonix_hp_rule(workspace_root: str | Path) -> bool:
             except Exception as e_clean:
                 logger.debug("Could not clean .git/info/exclude: %s", e_clean)
 
+        agents_dir = ws_path / ".agents"
+        try:
+            if agents_dir.is_dir() and not any(agents_dir.iterdir()):
+                agents_dir.rmdir()
+        except Exception:
+            pass
+
         return True
     except Exception as exc:
         logger.debug("Failed cleaning PhonixHP rule in %s: %s", workspace_root, exc)
         return False
 
 
+def _ensure_target_mcp_config(workspace_root: str | Path) -> bool:
+    """Configures <workspace_root>/.agents/mcp_config.json to register phonix-mmu MCP server."""
+    try:
+        ws_path = Path(workspace_root).resolve()
+        agents_dir = ws_path / ".agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        mcp_path = agents_dir / "mcp_config.json"
+
+        local_config: dict[str, Any] = {"mcpServers": {}}
+        if mcp_path.is_file():
+            try:
+                loaded = json.loads(mcp_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    local_config = loaded
+            except Exception as e_parse:
+                logger.debug("Could not parse existing %s: %s", mcp_path, e_parse)
+
+        if "mcpServers" not in local_config or not isinstance(local_config["mcpServers"], dict):
+            local_config["mcpServers"] = {}
+
+        repo_root_str = str(PHONIX_REPO_ROOT.resolve())
+        local_config["mcpServers"]["phonix-mmu"] = {
+            "command": sys.executable,
+            "args": ["-m", "src.mcp_server"],
+            "cwd": repo_root_str,
+            "env": {
+                "PHONIX_WORKSPACE": str(ws_path),
+                "PYTHONPATH": repo_root_str,
+            },
+        }
+
+        mcp_path.write_text(json.dumps(local_config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        logger.info("Configured phonix-mmu in %s", mcp_path)
+        return True
+    except Exception as exc:
+        logger.debug("Could not configure target mcp_config.json in %s: %s", workspace_root, exc)
+        return False
+
+
+def _clean_target_mcp_config(workspace_root: str | Path) -> bool:
+    """Removes phonix-mmu from <workspace_root>/.agents/mcp_config.json and cleans empty dirs."""
+    try:
+        ws_path = Path(workspace_root).resolve()
+        agents_dir = ws_path / ".agents"
+        mcp_path = agents_dir / "mcp_config.json"
+
+        if mcp_path.is_file():
+            try:
+                loaded = json.loads(mcp_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict) and "mcpServers" in loaded and isinstance(loaded["mcpServers"], dict):
+                    loaded["mcpServers"].pop("phonix-mmu", None)
+                    remaining = loaded.get("mcpServers", {})
+                    other_keys = [k for k in loaded.keys() if k != "mcpServers"]
+                    if not remaining or (not remaining and not other_keys):
+                        mcp_path.unlink(missing_ok=True)
+                        logger.info("Removed empty %s", mcp_path)
+                    else:
+                        mcp_path.write_text(json.dumps(loaded, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                        logger.info("Removed phonix-mmu from %s", mcp_path)
+            except Exception as e_clean:
+                logger.debug("Could not process %s during cleanup: %s", mcp_path, e_clean)
+
+        # If .agents directory becomes empty, delete the directory
+        try:
+            if agents_dir.is_dir() and not any(agents_dir.iterdir()):
+                agents_dir.rmdir()
+                logger.info("Removed empty directory %s", agents_dir)
+        except Exception:
+            pass
+
+        return True
+    except Exception as exc:
+        logger.debug("Failed cleaning MCP config in %s: %s", workspace_root, exc)
+        return False
+
+
 ensure_phonix_hp_rule = _ensure_phonix_hp_rule
 clean_phonix_hp_rule = _clean_phonix_hp_rule
+ensure_target_mcp_config = _ensure_target_mcp_config
+clean_target_mcp_config = _clean_target_mcp_config
 
 
 # --- Core Gateway Pipeline Controller ---
@@ -908,11 +994,30 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
         for path_str, ws_core in app.state.workspaces.items():
             p = Path(path_str)
             rule_exists = (p / ".agents" / "rules" / "PhonixHP.md").is_file()
+            mcp_exists = False
+            mcp_file = p / ".agents" / "mcp_config.json"
+            if mcp_file.is_file():
+                try:
+                    mcp_cfg = json.loads(mcp_file.read_text(encoding="utf-8"))
+                    mcp_exists = "phonix-mmu" in mcp_cfg.get("mcpServers", {})
+                except Exception:
+                    pass
+
+            if rule_exists and mcp_exists:
+                status = "Fully Armed (Rule + MCP)"
+                mode = "Protected (Rule + MCP)"
+            elif rule_exists:
+                status = "Rule Only"
+                mode = "Protected (Rule Only)"
+            else:
+                status = "Read-Only"
+                mode = "Read-Only (0-Byte)"
+
             result.append({
                 "workspace_path": path_str,
                 "name": p.name or path_str,
-                "status": "rule_injected" if rule_exists else "read_only",
-                "mode": "Protected" if rule_exists else "Read-Only (0-Byte)",
+                "status": status,
+                "mode": mode,
                 "indexed_files": ws_core.file_trie.total_files,
                 "ast_frames": len(ws_core._frame_registry),
             })
@@ -965,23 +1070,24 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
             )
 
         path_str = str(target_path)
-        ok = _ensure_phonix_hp_rule(target_path)
+        ok_rule = _ensure_phonix_hp_rule(target_path)
+        ok_mcp = _ensure_target_mcp_config(target_path)
         rule_file = target_path / ".agents" / "rules" / "PhonixHP.md"
-        if not ok or not rule_file.is_file():
-            raise HTTPException(status_code=500, detail=f"Failed deploying rule to '{target_path}'.")
+        if not ok_rule or not rule_file.is_file() or not ok_mcp:
+            raise HTTPException(status_code=500, detail=f"Failed deploying rule and MCP config to '{target_path}'.")
 
-        logger.info("User explicitly injected PhonixHP.md into '%s'", target_path.name)
+        logger.info("User explicitly injected PhonixHP.md and MCP config into '%s'", target_path.name)
         return {
             "status": "success",
             "workspace_path": path_str,
             "rule_path": str(rule_file),
-            "mode": "rule_injected",
-            "message": f"Successfully deployed PhonixHP.md quota rule to '{rule_file}'.",
+            "mode": "armor_and_mcp_ready",
+            "message": "Successfully deployed PhonixHP.md rule and configured .agents/mcp_config.json (phonix-mmu ready).",
         }
 
     @app.post("/v1/workspace/clean-rule")
     async def clean_rule_api(payload: dict[str, Any]) -> dict[str, Any]:
-        """Removes .agents/rules/PhonixHP.md and cleans up Phonix markers from .git/info/exclude."""
+        """Removes .agents/rules/PhonixHP.md, .agents/mcp_config.json, and cleans up Phonix markers from .git/info/exclude."""
         ws_raw = str(payload.get("workspace_path", "")).strip().strip("'\"")
         if not ws_raw:
             raise HTTPException(status_code=400, detail="workspace_path is required.")
@@ -994,12 +1100,13 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
 
         path_str = str(target_path)
         _clean_phonix_hp_rule(target_path)
-        logger.info("User explicitly cleaned PhonixHP.md from '%s'", target_path.name)
+        _clean_target_mcp_config(target_path)
+        logger.info("User explicitly cleaned PhonixHP.md and MCP config from '%s'", target_path.name)
         return {
             "status": "success",
             "workspace_path": path_str,
             "mode": "read_only",
-            "message": f"Successfully revoked PhonixHP.md and sanitized git exclude from '{target_path.name}'.",
+            "message": "Successfully revoked PhonixHP rule, removed MCP config, and cleaned git exclude.",
         }
 
     @app.post("/v1/workspace/detach")

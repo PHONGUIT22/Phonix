@@ -45,6 +45,7 @@ def render_dashboard_html() -> str:
     .btn-red:hover { background-color: #b91c1c; }
     .badge-ro { background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
     .badge-injected { background-color: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-armed { background-color: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
   </style>
 </head>
 <body class="min-h-screen p-4 md:p-8">
@@ -142,9 +143,10 @@ def render_dashboard_html() -> str:
           <button
             onclick="injectRuleAction()"
             id="btnInject"
+            title="Tạo .agents/rules/PhonixHP.md và cấu hình .agents/mcp_config.json để AI CLI trong dự án nhận diện ngay tool phonix-mmu."
             class="btn-yellow px-5 py-2.5 rounded-lg text-sm font-semibold shadow-md flex items-center gap-2"
           >
-            <span>🟡</span> Nhả Rule PhonixHP.md
+            <span>🟡</span> [ Cấp Quota Armor & Cấu Hình MCP Tool ]
           </button>
 
           <button
@@ -200,8 +202,8 @@ def render_dashboard_html() -> str:
       <ul class="list-disc list-inside space-y-1 text-gray-400">
         <li><strong>Read-Only by Default</strong>: Thao tác quét nạp dự án không bao giờ ghi bất kỳ file nào lên ổ cứng.</li>
         <li><strong>No Global Pollution</strong>: Không tự ý ghi đè vào <code>~/.gemini</code> hay thư mục người dùng cá nhân.</li>
-        <li><strong>Explicit Rule Deployment</strong>: Chỉ ghi duy nhất <code>.agents/rules/PhonixHP.md</code> khi người dùng chủ động bấm xác nhận "Nhả Rule".</li>
-        <li><strong>Clean Reversibility</strong>: Bấm "Thu Hồi & Dọn Sạch" sẽ xóa ngay lập tức file rule và hoàn trả <code>.git/info/exclude</code> nguyên vẹn.</li>
+        <li><strong>Explicit Armor & MCP Deployment</strong>: Chỉ tạo <code>.agents/rules/PhonixHP.md</code> và cấu hình <code>.agents/mcp_config.json</code> khi người dùng chủ động bấm xác nhận "Cấp Quota Armor & Cấu Hình MCP Tool".</li>
+        <li><strong>Clean Reversibility</strong>: Bấm "Thu Hồi & Dọn Sạch" sẽ xóa ngay lập tức file rule, gỡ cấu hình MCP và hoàn trả <code>.git/info/exclude</code> nguyên vẹn.</li>
       </ul>
     </div>
 
@@ -266,9 +268,17 @@ def render_dashboard_html() -> str:
         for (const ws of workspaces) {
           totalFiles += ws.indexed_files || 0;
           totalFrames += ws.ast_frames || 0;
-          const isRuleInjected = ws.status === 'rule_injected';
-          const badgeClass = isRuleInjected ? 'badge-injected' : 'badge-ro';
-          const badgeText = isRuleInjected ? 'Protected (PhonixHP.md)' : 'Read-Only (0-Byte File)';
+          const isArmed = ws.status === 'Fully Armed (Rule + MCP)' || ws.mode === 'Protected (Rule + MCP)';
+          const isRuleOnly = ws.status === 'Rule Only' || ws.status === 'rule_injected';
+          let badgeClass = 'badge-ro';
+          let badgeText = 'Read-Only (RAM Only)';
+          if (isArmed) {
+            badgeClass = 'badge-armed';
+            badgeText = '🛡️ Fully Armed (Rule + MCP Tool Sẵn Sàng)';
+          } else if (isRuleOnly) {
+            badgeClass = 'badge-injected';
+            badgeText = 'Protected (Rule Only)';
+          }
 
           html += `
             <tr class="hover:bg-gray-900/50 transition-colors">
@@ -292,18 +302,18 @@ def render_dashboard_html() -> str:
                   🔄 Quét lại
                 </button>
                 ${
-                  !isRuleInjected
+                  (!isArmed && !isRuleOnly)
                     ? `<button
                         onclick="selectAndInject('${escapeJs(ws.workspace_path)}')"
                         class="px-2.5 py-1 text-xs rounded bg-amber-900/70 hover:bg-amber-800 text-amber-200 border border-amber-700"
-                        title="Thả rule PhonixHP.md vào dự án"
+                        title="Cấp Quota Armor và nạp MCP Tool (phonix-mmu) vào dự án"
                       >
-                        🟡 Nhả Rule
+                        🟡 Cấp Armor & MCP
                       </button>`
                     : `<button
                         onclick="selectAndClean('${escapeJs(ws.workspace_path)}')"
                         class="px-2.5 py-1 text-xs rounded bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800"
-                        title="Thu hồi file rule"
+                        title="Thu hồi file rule và gỡ cấu hình MCP"
                       >
                         🔴 Thu Hồi
                       </button>`
@@ -365,7 +375,7 @@ def render_dashboard_html() -> str:
       if (!path) return;
 
       const confirmed = confirm(
-        `Xác nhận thả rule PhonixHP.md vào thư mục:\\n${path}\\n\\nThao tác này sẽ tạo duy nhất file .agents/rules/PhonixHP.md và cập nhật .git/info/exclude để không làm bẩn git.`
+        `Xác nhận cấp Quota Armor và nạp MCP Tool (phonix-mmu) vào dự án: \\n${path}\\n\\nThao tác này sẽ tạo file .agents/rules/PhonixHP.md, cấu hình .agents/mcp_config.json (phonix-mmu) và cập nhật .git/info/exclude để không làm bẩn git.`
       );
       if (!confirmed) return;
 
@@ -377,7 +387,7 @@ def render_dashboard_html() -> str:
         });
         const data = await res.json();
         if (res.ok) {
-          showToast(data.message || `Đã thả rule PhonixHP.md thành công vào ${path}!`, true);
+          showToast(data.message || `Đã cấp Quota Armor và cấu hình MCP Tool thành công vào ${path}!`, true);
           await refreshAll();
         } else {
           showToast(data.detail || 'Lỗi khi thả rule.', false);
@@ -391,7 +401,7 @@ def render_dashboard_html() -> str:
       const path = pathOverride || getTargetInput();
       if (!path) return;
 
-      const confirmed = confirm(`Xác nhận thu hồi và xóa sạch PhonixHP.md khỏi:\\n${path}`);
+      const confirmed = confirm(`Xác nhận thu hồi Quota Armor và xóa cấu hình MCP khỏi:\\n${path}`);
       if (!confirmed) return;
 
       try {
@@ -402,7 +412,7 @@ def render_dashboard_html() -> str:
         });
         const data = await res.json();
         if (res.ok) {
-          showToast(data.message || `Đã thu hồi PhonixHP.md và dọn sạch git exclude khỏi ${path}!`, true);
+          showToast(data.message || `Đã thu hồi Quota Armor, gỡ MCP config và dọn sạch git exclude khỏi ${path}!`, true);
           await refreshAll();
         } else {
           showToast(data.detail || 'Lỗi khi dọn dẹp rule.', false);

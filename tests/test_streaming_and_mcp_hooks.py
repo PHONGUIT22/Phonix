@@ -595,20 +595,48 @@ def test_workspace_management_and_dashboard_routes(tmp_path: Path) -> None:
     assert len(ws_list_after) >= 1
     target_entry = next((w for w in ws_list_after if w["workspace_path"] == str(external_ws.resolve())), None)
     assert target_entry is not None
-    assert target_entry["status"] == "read_only"
+    assert target_entry["status"] in ("Read-Only", "read_only")
 
     # 5. POST /v1/workspace/inject-rule (Explicit opt-in)
     assert "/v1/workspace/inject-rule" in routes
     inject_res = run_coro(routes["/v1/workspace/inject-rule"]({"workspace_path": str(external_ws)}))
     assert inject_res["status"] == "success"
+    assert inject_res["mode"] == "armor_and_mcp_ready"
+    assert "phonix-mmu ready" in inject_res["message"]
     rule_file = external_ws / ".agents" / "rules" / "PhonixHP.md"
     assert rule_file.is_file()
+
+    # Verify .agents/mcp_config.json was created and configured with phonix-mmu
+    mcp_config_file = external_ws / ".agents" / "mcp_config.json"
+    assert mcp_config_file.is_file()
+    mcp_data = json.loads(mcp_config_file.read_text(encoding="utf-8"))
+    assert "mcpServers" in mcp_data
+    assert "phonix-mmu" in mcp_data["mcpServers"]
+    server_cfg = mcp_data["mcpServers"]["phonix-mmu"]
+    assert server_cfg["args"] == ["-m", "src.mcp_server"]
+    assert server_cfg["env"]["PHONIX_WORKSPACE"] == str(external_ws.resolve())
+    assert "PYTHONPATH" in server_cfg["env"]
+    assert "cwd" in server_cfg
+
+    # Workspace status now shows "Fully Armed (Rule + MCP)"
+    ws_list_armed = run_coro(routes["/v1/workspaces"]())
+    target_armed = next((w for w in ws_list_armed if w["workspace_path"] == str(external_ws.resolve())), None)
+    assert target_armed is not None
+    assert target_armed["status"] == "Fully Armed (Rule + MCP)"
 
     # 6. POST /v1/workspace/clean-rule (Explicit revocation)
     assert "/v1/workspace/clean-rule" in routes
     clean_res = run_coro(routes["/v1/workspace/clean-rule"]({"workspace_path": str(external_ws)}))
     assert clean_res["status"] == "success"
     assert not rule_file.exists()
+    assert not mcp_config_file.exists()
+    assert not (external_ws / ".agents").exists()
+
+    # Workspace status reverts to "Read-Only"
+    ws_list_cleaned = run_coro(routes["/v1/workspaces"]())
+    target_cleaned = next((w for w in ws_list_cleaned if w["workspace_path"] == str(external_ws.resolve())), None)
+    assert target_cleaned is not None
+    assert target_cleaned["status"] in ("Read-Only", "read_only")
 
     # 7. POST /v1/workspace/detach
     assert "/v1/workspace/detach" in routes
@@ -773,8 +801,8 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     # Next tool call increments turn_count to 25 (warning threshold)
     r_turn25 = invoke("unrelated_tool", {"action": "compute"})
     assert r_turn25["decision"] == "allow"
-    assert "Turn budget warning" in r_turn25.get("note", "")
-    assert "turn 25 reached" in r_turn25.get("note", "")
+    assert "Turn budget warning" in (r_turn25.get("reason", "") or r_turn25.get("note", ""))
+    assert "turn 25 reached" in (r_turn25.get("reason", "") or r_turn25.get("note", ""))
 
     # Write a state with turn_count = 39
     with open(circuit_file, "r", encoding="utf-8") as f:
@@ -834,7 +862,7 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
 
     r_cfg_warn = invoke("unrelated_tool", {"action": "compute"})
     assert r_cfg_warn["decision"] == "allow"
-    assert "turn 5 reached (hard-deny at turn 8)" in r_cfg_warn.get("note", "")
+    assert "turn 5 reached (hard-deny at turn 8)" in (r_cfg_warn.get("reason", "") or r_cfg_warn.get("note", ""))
 
     with open(circuit_file, "r", encoding="utf-8") as f:
         c_state = json.load(f)
@@ -846,6 +874,38 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     r_cfg_deny = invoke("unrelated_tool", {"action": "compute"})
     assert r_cfg_deny["decision"] == "deny"
     assert "Task Turn Budget Exceeded (8 consecutive tool turns)" in r_cfg_deny["reason"]
+
+
+def test_target_mcp_config_preserves_existing_servers(tmp_path: Path) -> None:
+    """Verifies that _ensure_target_mcp_config preserves other MCP servers and _clean_target_mcp_config only deletes phonix-mmu."""
+    from src.gateway.proxy_server import _ensure_target_mcp_config, _clean_target_mcp_config
+
+    agents_dir = tmp_path / ".agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    mcp_file = agents_dir / "mcp_config.json"
+    initial_config = {
+        "mcpServers": {
+            "custom-tool": {
+                "command": "node",
+                "args": ["server.js"],
+            }
+        }
+    }
+    mcp_file.write_text(json.dumps(initial_config, indent=2), encoding="utf-8")
+
+    # 1. Ensure target mcp config merges phonix-mmu without overwriting custom-tool
+    assert _ensure_target_mcp_config(tmp_path) is True
+    merged_data = json.loads(mcp_file.read_text(encoding="utf-8"))
+    assert "custom-tool" in merged_data["mcpServers"]
+    assert "phonix-mmu" in merged_data["mcpServers"]
+
+    # 2. Clean target mcp config leaves custom-tool intact
+    assert _clean_target_mcp_config(tmp_path) is True
+    assert mcp_file.is_file()
+    cleaned_data = json.loads(mcp_file.read_text(encoding="utf-8"))
+    assert "custom-tool" in cleaned_data["mcpServers"]
+    assert "phonix-mmu" not in cleaned_data["mcpServers"]
+    assert (tmp_path / ".agents").exists()
 
 
 

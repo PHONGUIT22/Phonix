@@ -423,7 +423,6 @@ def handle_pre_tool_use() -> int:
         )
         response = {
             "decision": "allow",
-            "note": warning_msg,
             "reason": warning_msg,
         }
         _notify_gateway(tool_name, args, "allow", warning_msg)

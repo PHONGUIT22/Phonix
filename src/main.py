@@ -24,6 +24,7 @@ from src.gateway.proxy_server import (
     GatewayCore,
     PHONIX_HP_RULE_CONTENT,
     _ensure_phonix_hp_rule,
+    _ensure_target_mcp_config,
     create_gateway_app,
 )
 
@@ -255,35 +256,8 @@ def attach_workspace(target_dir: str = ".") -> int:
     print(f" [PASS] Injected PhonixHP.md quota rule at {rules_file}")
 
     # 2. Register phonix-mmu in target's .agents/mcp_config.json
-    agents_dir = target_path / ".agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    mcp_config_path = agents_dir / "mcp_config.json"
-
-    py_executable = sys.executable or "python"
-    phonix_repo_dir = _REPO_ROOT
-
-    config_data: dict[str, Any] = {"mcpServers": {}}
-    if mcp_config_path.is_file():
-        try:
-            with open(mcp_config_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                if isinstance(loaded, dict) and "mcpServers" in loaded:
-                    config_data = loaded
-        except Exception:
-            pass
-
-    config_data.setdefault("mcpServers", {})["phonix-mmu"] = {
-        "command": py_executable,
-        "args": ["-m", "src.mcp_server"],
-        "cwd": phonix_repo_dir,
-        "env": {
-            "PHONIX_WORKSPACE": str(target_path),
-            "PYTHONPATH": phonix_repo_dir,
-        },
-    }
-
-    with open(mcp_config_path, "w", encoding="utf-8") as f:
-        json.dump(config_data, f, indent=2)
+    _ensure_target_mcp_config(target_path)
+    mcp_config_path = target_path / ".agents" / "mcp_config.json"
     print(f" [PASS] Registered phonix-mmu MCP server in {mcp_config_path}")
 
     # 3. Index target codebase in memory (Read-Only)

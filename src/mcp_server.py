@@ -932,6 +932,20 @@ class PhonixMCPServer:
             if not target_str:
                 continue
 
+            # Auto-repair Windows MCP client mojibake if target has been decoded via cp1252/latin-1
+            for cand_enc in ("latin-1", "cp1252"):
+                try:
+                    re_t = target_str.encode(cand_enc).decode("utf-8")
+                    if re_t in content or re_t.replace("\r\n", "\n") in content.replace("\r\n", "\n"):
+                        target_str = re_t
+                        try:
+                            replacement_str = replacement_str.encode(cand_enc).decode("utf-8")
+                        except Exception:
+                            pass
+                        break
+                except Exception:
+                    pass
+
             # 1. Exact match attempt
             if target_str in content:
                 content = content.replace(target_str, replacement_str, 1)
