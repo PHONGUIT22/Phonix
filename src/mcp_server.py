@@ -1130,6 +1130,21 @@ class PhonixMCPServer:
                 sys.stdout.flush()
 
 
-if __name__ == "__main__":
-    server = PhonixMCPServer()
+def run_stdio_server(workspace_root: str | None = None) -> None:
+    """Runs the Stdio MCP Server for a target workspace."""
+    if workspace_root is not None:
+        resolved_ws = str(Path(workspace_root).resolve())
+    else:
+        env_root = os.environ.get("PHONIX_WORKSPACE")
+        if env_root and os.path.isdir(env_root):
+            resolved_ws = str(Path(env_root).resolve())
+        else:
+            resolved_ws = str(Path(os.getcwd()).resolve())
+
+    logger.info("Phonix MCP Stdio Server running for workspace: %s", resolved_ws)
+    server = PhonixMCPServer(workspace_root=resolved_ws)
     server.run_stdio()
+
+
+if __name__ == "__main__":
+    run_stdio_server()

@@ -274,12 +274,79 @@ def attach_workspace(target_dir: str = ".") -> int:
     return 0
 
 
-def run_mcp_server() -> None:
-    """Runs the Stdio MCP Server for Antigravity or Claude CLI."""
-    from src.mcp_server import PhonixMCPServer
+def run_mcp_server(workspace_root: str | None = None) -> None:
+    """Runs the Stdio MCP Server for Antigravity, Claude, or Cursor."""
+    from src.mcp_server import run_stdio_server
 
-    server = PhonixMCPServer(workspace_root=_REPO_ROOT)
-    server.run_stdio()
+    run_stdio_server(workspace_root=workspace_root)
+
+
+def export_configs_command(workspace: str = ".", out: str | None = None) -> int:
+    """Generates 1-click MCP configs for Claude Desktop, Cursor, and Cline."""
+    target_ws = str(Path(workspace).resolve())
+    phonix_root = str(Path(_REPO_ROOT).resolve())
+    py_exec = sys.executable or "python"
+
+    if out:
+        out_dir = Path(out).resolve()
+    else:
+        out_dir = Path(_REPO_ROOT) / "integrations" / "mcp_configs" / "generated"
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    claude_cfg = {
+        "mcpServers": {
+            "phonix-mmu": {
+                "command": py_exec,
+                "args": ["-m", "src.main", "mcp", "--workspace", target_ws],
+                "cwd": phonix_root,
+            }
+        }
+    }
+
+    cursor_cfg = {
+        "mcpServers": {
+            "phonix-mmu": {
+                "command": py_exec,
+                "args": ["-m", "src.main", "mcp", "--workspace", target_ws],
+                "cwd": phonix_root,
+            }
+        }
+    }
+
+    cline_cfg = {
+        "mcpServers": {
+            "phonix-mmu": {
+                "command": py_exec,
+                "args": ["-m", "src.main", "mcp", "--workspace", target_ws],
+                "cwd": phonix_root,
+                "disabled": False,
+                "autoApprove": [],
+            }
+        }
+    }
+
+    claude_path = out_dir / "claude_desktop_config.json"
+    cursor_path = out_dir / "cursor_mcp_config.json"
+    cline_path = out_dir / "cline_mcp_config.json"
+
+    claude_path.write_text(json.dumps(claude_cfg, indent=2) + "\n", encoding="utf-8")
+    cursor_path.write_text(json.dumps(cursor_cfg, indent=2) + "\n", encoding="utf-8")
+    cline_path.write_text(json.dumps(cline_cfg, indent=2) + "\n", encoding="utf-8")
+
+    print("=" * 68)
+    print(" Phonix v2.0 - 1-Click Multi-Platform MCP Configs Exporter")
+    print("=" * 68)
+    print(f" Target Workspace: {target_ws}")
+    print(f" Phonix Repo Root: {phonix_root}")
+    print(f" Python Binary:    {py_exec}")
+    print(f" Output Directory: {out_dir}")
+    print("-" * 68)
+    print(f" [PASS] Claude Desktop: {claude_path}")
+    print(f" [PASS] Cursor IDE:     {cursor_path}")
+    print(f" [PASS] Cline/Roo Code: {cline_path}")
+    print("=" * 68)
+    return 0
 
 
 def build_dataset_command(
@@ -352,7 +419,23 @@ def cli_entrypoint() -> None:
     subparsers.add_parser("install-agy", help="Install Quota-Saver suite into Antigravity CLI")
 
     # mcp command
-    subparsers.add_parser("mcp", help="Run Model Context Protocol stdio server")
+    mcp_parser = subparsers.add_parser("mcp", help="Run Model Context Protocol stdio server")
+    mcp_parser.add_argument(
+        "-w", "--workspace",
+        default=None,
+        help="Target workspace directory (default: current working directory os.getcwd())",
+    )
+
+    # export-configs command
+    export_parser = subparsers.add_parser(
+        "export-configs", help="Generate 1-click MCP configs for Claude, Cursor, and Cline"
+    )
+    export_parser.add_argument(
+        "--workspace", "-w", default=".", help="Target workspace path to configure"
+    )
+    export_parser.add_argument(
+        "--out", "-o", default=None, help="Output directory to save generated configs"
+    )
 
     # build-dataset command
     dataset_parser = subparsers.add_parser(
@@ -392,7 +475,9 @@ def cli_entrypoint() -> None:
     elif args.command == "install-agy":
         install_agy()
     elif args.command == "mcp":
-        run_mcp_server()
+        run_mcp_server(workspace_root=args.workspace)
+    elif args.command == "export-configs":
+        export_configs_command(workspace=args.workspace, out=args.out)
     elif args.command == "build-dataset":
         build_dataset_command(max_commits=args.max_commits, output_path=args.output)
     elif args.command == "attach":

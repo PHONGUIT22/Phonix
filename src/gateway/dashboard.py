@@ -194,6 +194,76 @@ def render_dashboard_html() -> str:
       </div>
     </div>
 
+    <!-- 1-Click Multi-Platform MCP Configs Card -->
+    <div class="card p-6 shadow-lg">
+      <div class="flex items-center justify-between pb-3 border-b border-gray-800">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <span>📋</span> 1-Click MCP Configs for Claude & Cursor
+          </h3>
+          <p class="text-xs text-gray-400 mt-1">
+            Sao chép nhanh cấu hình Model Context Protocol (MCP) chuẩn hóa để kết nối Phonix v2.0 với Claude Desktop hoặc Cursor IDE.
+          </p>
+        </div>
+      </div>
+
+      <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Claude Desktop Config -->
+        <div class="p-4 rounded-lg bg-gray-900 border border-gray-800 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-2 mb-2 border-b border-gray-800">
+              <span class="font-bold text-sm text-amber-400 flex items-center gap-1.5">
+                <span>🟠</span> Claude Desktop
+              </span>
+              <span class="text-xs text-gray-500 font-mono">%APPDATA%\\Claude\\claude_desktop_config.json</span>
+            </div>
+            <pre id="claudeConfigSnippet" class="p-3 rounded bg-black/60 text-xs font-mono text-gray-300 overflow-x-auto select-all max-h-48">{
+  "mcpServers": {
+    "phonix-mmu": {
+      "command": "python",
+      "args": ["-m", "src.main", "mcp", "--workspace", "&lt;TARGET_PROJECT_PATH&gt;"],
+      "cwd": "&lt;PHONIX_REPO_ROOT&gt;"
+    }
+  }
+}</pre>
+          </div>
+          <button
+            onclick="copySnippet('claudeConfigSnippet', 'Claude Desktop')"
+            class="mt-3 w-full py-2 px-3 rounded bg-amber-900/60 hover:bg-amber-800 text-amber-200 text-xs font-semibold flex items-center justify-center gap-2 border border-amber-700/60 transition-colors"
+          >
+            📋 Sao Chép Cấu Hình Claude Desktop
+          </button>
+        </div>
+
+        <!-- Cursor IDE Config -->
+        <div class="p-4 rounded-lg bg-gray-900 border border-gray-800 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between pb-2 mb-2 border-b border-gray-800">
+              <span class="font-bold text-sm text-blue-400 flex items-center gap-1.5">
+                <span>⚡</span> Cursor & Windsurf IDE
+              </span>
+              <span class="text-xs text-gray-500 font-mono">.cursor/mcp.json</span>
+            </div>
+            <pre id="cursorConfigSnippet" class="p-3 rounded bg-black/60 text-xs font-mono text-gray-300 overflow-x-auto select-all max-h-48">{
+  "mcpServers": {
+    "phonix-mmu": {
+      "command": "python",
+      "args": ["-m", "src.main", "mcp", "--workspace", "&lt;TARGET_PROJECT_PATH&gt;"],
+      "cwd": "&lt;PHONIX_REPO_ROOT&gt;"
+    }
+  }
+}</pre>
+          </div>
+          <button
+            onclick="copySnippet('cursorConfigSnippet', 'Cursor IDE')"
+            class="mt-3 w-full py-2 px-3 rounded bg-blue-900/60 hover:bg-blue-800 text-blue-200 text-xs font-semibold flex items-center justify-center gap-2 border border-blue-700/60 transition-colors"
+          >
+            📋 Sao Chép Cấu Hình Cursor IDE
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Architecture & Safety Invariants Footer Card -->
     <div class="card p-5 text-xs text-gray-400 space-y-2 border-dashed">
       <div class="font-semibold text-gray-300 uppercase tracking-wider flex items-center gap-2">
@@ -440,6 +510,21 @@ def render_dashboard_html() -> str:
       } catch (err) {
         showToast(`Lỗi kết nối tới Gateway: ${err.message}`, false);
       }
+    }
+
+    function copySnippet(elementId, platformName) {
+      const el = document.getElementById(elementId);
+      if (!el) return;
+      let text = el.innerText || el.textContent;
+      const targetPath = (document.getElementById('wsPathInput')?.value || '').trim();
+      if (targetPath) {
+        text = text.replace(/<TARGET_PROJECT_PATH>/g, targetPath);
+      }
+      navigator.clipboard.writeText(text).then(() => {
+        showToast(`Đã sao chép cấu hình ${platformName} vào clipboard!`, true);
+      }).catch(() => {
+        showToast(`Không thể tự động sao chép. Hãy bôi đen đoạn mã để copy.`, false);
+      });
     }
 
     function selectAndAttach(path) {

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "phonix-mmu": {
+      "command": "python",
+      "args": ["-m", "src.main", "mcp", "--workspace", "<TARGET_PROJECT_PATH>"],
+      "cwd": "<PHONIX_REPO_ROOT>",
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
