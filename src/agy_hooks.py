@@ -130,11 +130,15 @@ def _notify_gateway(tool_name: str, args: dict[str, Any], decision: str, reason:
         pass
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+PHONIX_RUNTIME_DIR = _REPO_ROOT / ".phonix_runtime"
+
+
 def _get_circuit_state_path() -> Path:
     env_p = os.environ.get("PHONIX_CIRCUIT_STATE_PATH")
     if env_p:
         return Path(env_p)
-    return Path.home() / ".gemini" / "phonix_circuit_state.json"
+    return PHONIX_RUNTIME_DIR / "circuit_state.json"
 
 
 def _load_circuit_state() -> dict[str, Any]:

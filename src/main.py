@@ -395,6 +395,154 @@ def build_dataset_command(
     return count
 
 
+def find_phonix_leftovers(home_dir: Path) -> dict[str, list[Any]]:
+    """Scans <home_dir>/.gemini for Phonix leftovers (state, rules, skills, MCP, logs)."""
+    gemini_dir = home_dir / ".gemini"
+    leftovers: dict[str, list[Any]] = {
+        "state": [],
+        "rules": [],
+        "skills": [],
+        "mcp_configs": [],
+        "logs": [],
+    }
+    if not gemini_dir.is_dir():
+        return leftovers
+
+    # 1. State files
+    state_file = gemini_dir / "phonix_circuit_state.json"
+    if state_file.is_file():
+        leftovers["state"].append(state_file)
+
+    # 2. Rules
+    for pattern in ("*phonix*.md", "*Phonix*.md"):
+        for rule_path in gemini_dir.glob(f"**/rules/{pattern}"):
+            if rule_path.is_file() and rule_path not in leftovers["rules"]:
+                leftovers["rules"].append(rule_path)
+
+    # 3. Skills
+    for skill_dir in gemini_dir.glob("skills/*phonix*"):
+        if skill_dir.exists() and skill_dir not in leftovers["skills"]:
+            leftovers["skills"].append(skill_dir)
+
+    # 4. MCP configs
+    for cfg_cand in [
+        gemini_dir / "mcp_config.json",
+        gemini_dir / "antigravity-cli" / "mcp_config.json",
+    ]:
+        if cfg_cand.is_file():
+            try:
+                data = json.loads(cfg_cand.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and "mcpServers" in data:
+                    if "phonix-mmu" in data["mcpServers"]:
+                        leftovers["mcp_configs"].append(cfg_cand)
+            except Exception:
+                pass
+
+    # 5. Logs
+    for log_path in gemini_dir.glob("**/*phonix*.log"):
+        if log_path.is_file() and log_path not in leftovers["logs"]:
+            leftovers["logs"].append(log_path)
+
+    return leftovers
+
+
+def doctor_command(fix: bool = False, home_dir: Path | None = None) -> int:
+    """Audits and optionally cleans Phonix leftovers under ~/.gemini."""
+    import shutil
+
+    if home_dir is None:
+        home_dir = Path.home()
+
+    gemini_dir = home_dir / ".gemini"
+    print("=" * 65)
+    print(" Phonix v2.0 Doctor - Machine Hygiene Auditor")
+    print("=" * 65)
+    print(f" Target Home:   {home_dir}")
+    print(f" Target Gemini: {gemini_dir}")
+    print("-" * 65)
+
+    leftovers = find_phonix_leftovers(home_dir)
+    total_count = sum(len(items) for items in leftovers.values())
+
+    if total_count == 0:
+        print(" [PASS] Clean machine: No Phonix leftovers found under ~/.gemini.")
+        print("=" * 65)
+        return 0
+
+    print(f" [!] Found {total_count} Phonix leftover item(s) in ~/.gemini:")
+    for category, items in leftovers.items():
+        if items:
+            print(f"   * {category.upper()}:")
+            for item in items:
+                print(f"       - {item}")
+    print("-" * 65)
+
+    if not fix:
+        print(" To back up and remove these leftovers, run:")
+        print("   phonix doctor --fix")
+        print("=" * 65)
+        return 0
+
+    # User confirmation for --fix
+    confirm = input(" Would you like to back up and remove all identified leftovers? (y/N): ").strip().lower()
+    if confirm not in ("y", "yes"):
+        print(" Cleanup aborted by user. No files were modified.")
+        print("=" * 65)
+        return 0
+
+    backup_dir = home_dir / "phonix_leftovers_backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    print(f" [*] Backing up leftovers to: {backup_dir}")
+
+    removed_count = 0
+    # Process files / directories
+    for cat in ("state", "rules", "skills", "logs"):
+        for item in leftovers[cat]:
+            item_path = Path(item)
+            if not item_path.exists():
+                continue
+            rel_dest = backup_dir / item_path.name
+            try:
+                if item_path.is_file():
+                    shutil.copy2(item_path, rel_dest)
+                    item_path.unlink()
+                elif item_path.is_dir():
+                    if rel_dest.exists():
+                        shutil.rmtree(rel_dest)
+                    shutil.copytree(item_path, rel_dest)
+                    shutil.rmtree(item_path)
+                removed_count += 1
+                print(f"   [REMOVED] {item_path} -> backed up to {rel_dest}")
+            except Exception as exc:
+                print(f"   [ERROR] Failed cleaning {item_path}: {exc}")
+
+    # Process MCP configs
+    for cfg_cand in leftovers["mcp_configs"]:
+        cfg_path = Path(cfg_cand)
+        if not cfg_path.is_file():
+            continue
+        try:
+            raw = cfg_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            # Backup original file
+            backup_file = backup_dir / f"{cfg_path.name}.bak"
+            backup_file.write_text(raw, encoding="utf-8")
+
+            if "mcpServers" in data and "phonix-mmu" in data["mcpServers"]:
+                del data["mcpServers"]["phonix-mmu"]
+                cfg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                removed_count += 1
+                print(f"   [CLEANED] Removed 'phonix-mmu' from {cfg_path}")
+        except Exception as exc:
+            print(f"   [ERROR] Failed updating MCP config {cfg_path}: {exc}")
+
+    print("-" * 65)
+    print(f" [PASS] Successfully cleaned {removed_count} item(s).")
+    print(f" Backup preserved at: {backup_dir}")
+    print("=" * 65)
+    return 0
+
+
 def cli_entrypoint() -> None:
     """Command Line Interface entrypoint defined in pyproject.toml."""
     parser = argparse.ArgumentParser(
@@ -469,6 +617,16 @@ def cli_entrypoint() -> None:
         help="Target workspace path (default: current directory)",
     )
 
+    # doctor command
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Audit and clean Phonix leftovers in ~/.gemini"
+    )
+    doctor_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Prompt to back up and remove leftovers from ~/.gemini",
+    )
+
     args = parser.parse_args()
 
     if args.command == "start":
@@ -492,6 +650,8 @@ def cli_entrypoint() -> None:
         build_dataset_command(max_commits=args.max_commits, output_path=args.output)
     elif args.command == "attach":
         attach_workspace(target_dir=args.target_dir)
+    elif args.command == "doctor":
+        sys.exit(doctor_command(fix=args.fix))
     else:
         parser.print_help()
 

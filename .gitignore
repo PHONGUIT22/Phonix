@@ -75,6 +75,8 @@ dmypy.json
 # Phonix runtime cache
 models/*.gguf
 models/*.bin
+.phonix_runtime/
+.phonix_runtime/*
 
 # Phonix Proprietary Local-Only Moat (NEVER commit to public repo)
 private_moat/
