@@ -211,18 +211,29 @@ def handle_pre_tool_use() -> int:
         "reason": "..."
     }
     """
-    raw_input = sys.stdin.read().strip()
-    if not raw_input:
-        sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
+    hard_deny_mode = os.environ.get("PHONIX_HARD_DENY") == "1"
+
+    def respond(decision: str, reason: str, tool_name: str = "", args: dict[str, Any] | None = None) -> int:
+        if decision == "deny" and not hard_deny_mode:
+            decision = "allow"
+        response = {
+            "decision": decision,
+            "reason": reason,
+        }
+        if tool_name:
+            _notify_gateway(tool_name, args or {}, decision, reason)
+        sys.stdout.write(json.dumps(response) + "\n")
         sys.stdout.flush()
         return 0
+
+    raw_input = sys.stdin.read().strip()
+    if not raw_input:
+        return respond("allow", "No tool call input.")
 
     try:
         data = json.loads(raw_input)
     except Exception:
-        sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
-        sys.stdout.flush()
-        return 0
+        return respond("allow", "Could not parse tool call payload.")
 
     tool_call = data.get("toolCall", {})
     tool_name = tool_call.get("name", "")
@@ -258,74 +269,40 @@ def handle_pre_tool_use() -> int:
     }
     _save_circuit_state(updated_state)
 
-    # Rule 1 (Anti-Polling Lock)
+    # Circuit Breaker 1: Anti-Polling Lock (consecutive ManageTask status/list >= 2)
     is_manage_task = tool_name in ("ManageTask", "manage_task")
     action_val = str(args.get("Action") or args.get("action") or "").lower()
-    if (
-        is_manage_task
-        and action_val in ("status", "list")
-        and consecutive_count >= 2
-    ):
-        response = {
-            "decision": "deny",
-            "reason": "[Phonix Circuit Breaker] Anti-Polling Lock Tripped! Consecutive ManageTask polling is blocked.",
-        }
-        _notify_gateway(tool_name, args, "deny", response["reason"])
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
-        return 0
+    if is_manage_task and action_val in ("status", "list") and consecutive_count >= 2:
+        reason = "[Phonix Circuit Breaker] Anti-Polling Lock Tripped! Consecutive ManageTask polling detected."
+        return respond("deny", reason, tool_name, args)
 
+    # Circuit Breaker 2: Sleep loops
     if tool_name in ("run_command", "Bash", "bash", "execute_command"):
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd") or ""
-        if re.search(r"(?i)(?:Start-Sleep|while\s+true|\bsleep\s+\d+)", cmd):
-            response = {
-                "decision": "deny",
-                "reason": "[Phonix Circuit Breaker] Shell sleep loops are strictly forbidden.",
-            }
-            _notify_gateway(tool_name, args, "deny", response["reason"])
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
-            return 0
+        if re.search(r"(?i)(?:Start-Sleep|while\s+true|sleep\s+\d+)", cmd):
+            reason = "[Phonix Circuit Breaker] Shell sleep loops are discouraged to prevent task timeout."
+            return respond("deny", reason, tool_name, args)
 
-    # Rule 2 (Turn Budget Circuit Breaker: warn at 25, hard-deny at 40)
+    # Circuit Breaker 3: Turn Budget
     turn_warn = int(os.environ.get("PHONIX_TURN_WARN", "25"))
     turn_max = int(os.environ.get("PHONIX_TURN_MAX", "40"))
     if turn_count >= turn_max:
-        response = {
-            "decision": "deny",
-            "reason": (
-                f"[Phonix Circuit Breaker Tripped] Task Turn Budget Exceeded ({turn_max} consecutive tool turns)! "
-                f"Summarize and report to user."
-            ),
-        }
-        _notify_gateway(tool_name, args, "deny", response["reason"])
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
-        return 0
-        sys.stdout.flush()
-        return 0
+        reason = (
+            f"[Phonix Circuit Breaker] Task Turn Budget Limit reached ({turn_count}/{turn_max} consecutive turns). "
+            "Please consolidate tool actions."
+        )
+        return respond("deny", reason, tool_name, args)
 
-    # Rule 1: Guard sensitive credential files against read_file / view_file
+    # Rule: Guard sensitive credential files against read_file / view_file
     if tool_name in ("read_file", "view_file", "read_file_lines"):
         target_path = args.get("Path") or args.get("path") or args.get("file_path") or ""
         norm_path = target_path.replace("\\", "/")
 
         for pat in SENSITIVE_FILE_PATTERNS:
             if re.search(pat, norm_path):
-                response = {
-                    "decision": "deny",
-                    "reason": "[Phonix Zero-Trust Gate] Direct access to sensitive credential file is blocked by policy.",
-                }
-                _notify_gateway(tool_name, args, "deny", response["reason"])
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
-                return 0
+                reason = "[Phonix Zero-Trust Gate] Direct access to sensitive credential file is restricted by policy."
+                return respond("deny", reason, tool_name, args)
 
-        # Rule 1b: Technical Hard-Block for source code files
-        code_exts = {
-            ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
-            ".cpp", ".c", ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt"
-        }
         clean_p = target_path.strip().strip("'\"")
         if clean_p.startswith("file:///"):
             clean_p = clean_p[8:]
@@ -333,111 +310,55 @@ def handle_pre_tool_use() -> int:
             clean_p = clean_p[7:]
         p = Path(clean_p)
 
-        # Check if code file: Immediately Hard-Block direct reads regardless of line span
-        if (
-            p.suffix.lower() in code_exts
-            and os.environ.get("PHONIX_ALLOW_DIRECT_READ") != "1"
-            and os.environ.get("PHONIX_ALLOW_FULL_READ") != "1"
-        ):
-            response = {
-                "decision": "deny",
-                "reason": (
-                    f"[Phonix Hard-Block] Direct 'read_file' on source code files ({p.suffix}) is strictly disabled to prevent token loop inflation. "
-                    f"You MUST call MCP tool 'phonix_get_pruned_context(query=\"{p.name}\")' to inspect this file, "
-                    f"or use 'phonix_surgical_edit' to apply modifications."
-                ),
-            }
-            _notify_gateway(tool_name, args, "deny", response["reason"])
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
-            return 0
+        # Check line ranges
+        start_line = args.get("StartLine") if args.get("StartLine") is not None else args.get("start_line", args.get("startLine"))
+        end_line = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line", args.get("endLine"))
 
-        # For non-code files (.json, .md, .txt, .yaml, .yml, .toml, .lock, .csv): allow bounded reads (<= 120 lines)
-        start_line = args.get("StartLine") if args.get("StartLine") is not None else args.get("start_line")
-        if start_line is None:
-            start_line = args.get("startLine")
-        end_line = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line")
-        if end_line is None:
-            end_line = args.get("endLine")
-
-        bounded_ok = False
         if start_line is not None and end_line is not None:
             try:
                 s = int(start_line)
                 e = int(end_line)
                 span = abs(e - s)
-                if span <= 120:
-                    bounded_ok = True
-                else:
-                    response = {
-                        "decision": "deny",
-                        "reason": (
-                            f"[Phonix Quota Gate] Bounded read range ({span} lines) of '{target_path}' exceeds 120 lines. "
-                            f"Specify a smaller range (<= 100 lines)!"
-                        ),
-                    }
-                    _notify_gateway(tool_name, args, "deny", response["reason"])
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
-                    return 0
+                if span > 300:
+                    reason = (
+                        f"[Phonix Advisory] Bounded read range ({span} lines) of '{target_path}' exceeds 300 lines. "
+                        "Consider using 'phonix_get_pruned_context' for token efficiency."
+                    )
+                    return respond("deny", reason, tool_name, args)
             except (ValueError, TypeError):
-                bounded_ok = False
-
-        if not bounded_ok and os.environ.get("PHONIX_ALLOW_FULL_READ") != "1" and os.environ.get("PHONIX_ALLOW_DIRECT_READ") != "1":
+                pass
+        else:
+            # Full file read without line range
             if p.is_file():
                 try:
                     with open(p, "r", encoding="utf-8", errors="ignore") as f:
                         line_count = sum(1 for _ in f)
                 except Exception:
                     line_count = 0
+                if line_count > 300:
+                    reason = (
+                        f"[Phonix Advisory] File '{target_path}' is large ({line_count} lines > 300 lines). "
+                        "Consider using 'phonix_get_pruned_context' for token efficiency."
+                    )
+                    return respond("deny", reason, tool_name, args)
 
-                if line_count > 120:
-                    response = {
-                        "decision": "deny",
-                        "reason": (
-                            f"[Phonix Quota Gate] Full-file read of '{target_path}' ({line_count} lines) blocked to protect Quota. "
-                            f"Specify StartLine/EndLine (<= 100 lines)!"
-                        ),
-                    }
-                    _notify_gateway(tool_name, args, "deny", response["reason"])
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
-                    return 0
-
-    # Rule 2: Guard dangerous exfiltration and destructive commands against run_command
+    # Rule: Guard dangerous exfiltration and destructive commands against run_command
     if tool_name in ("run_command", "bash", "execute_command"):
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd") or ""
-
         for pat in MALICIOUS_COMMAND_PATTERNS:
             if re.search(pat, cmd):
-                response = {
-                    "decision": "deny",
-                    "reason": "[Phonix Zero-Trust Gate] Command blocked: detected potential secret exposure or unsafe command.",
-                }
-                _notify_gateway(tool_name, args, "deny", response["reason"])
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
-                return 0
+                reason = "[Phonix Zero-Trust Gate] Command warning: detected potential secret exposure or unsafe pattern."
+                return respond("deny", reason, tool_name, args)
 
-    # Allow benign or verified operations
+    # Turn budget warning threshold
     if turn_count >= turn_warn:
         warning_msg = (
             f"[Phonix Circuit Breaker Warning] Turn budget warning: turn {turn_count} reached "
             f"(hard-deny at turn {turn_max}). Please consolidate tool actions."
         )
-        response = {
-            "decision": "allow",
-            "reason": warning_msg,
-        }
-        _notify_gateway(tool_name, args, "allow", warning_msg)
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
-        return 0
+        return respond("allow", warning_msg, tool_name, args)
 
-    _notify_gateway(tool_name, args, "allow", "Verified operation allowed.")
-    sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
-    sys.stdout.flush()
-    return 0
+    return respond("allow", "Verified operation allowed.", tool_name, args)
 
 
 def main() -> int:

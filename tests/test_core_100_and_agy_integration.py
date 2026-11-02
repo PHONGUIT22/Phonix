@@ -371,7 +371,7 @@ def test_antigravity_hooks_contract() -> None:
         assert "[Phonix v2.0 Context MMU Active]" in sys_msg
         assert "phonix_get_pruned_context" in sys_msg
 
-        # B. pre-tool-use: block read_file to .env
+        # B. pre-tool-use: by default allow with advisory warning, with PHONIX_HARD_DENY=1 deny
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -379,10 +379,23 @@ def test_antigravity_hooks_contract() -> None:
         )
         handle_pre_tool_use()
         res_env = json.loads(out_buf.getvalue().strip())
-        assert res_env["decision"] == "deny"
+        assert res_env["decision"] == "allow"
         assert "[Phonix Zero-Trust Gate]" in res_env["reason"]
 
-        # C. pre-tool-use: block .env.local
+        os.environ["PHONIX_HARD_DENY"] = "1"
+        try:
+            out_buf = io.StringIO()
+            sys.stdout = out_buf
+            sys.stdin = io.StringIO(
+                json.dumps({"toolCall": {"name": "read_file", "args": {"Path": ".env"}}})
+            )
+            handle_pre_tool_use()
+            res_env_deny = json.loads(out_buf.getvalue().strip())
+            assert res_env_deny["decision"] == "deny"
+        finally:
+            os.environ.pop("PHONIX_HARD_DENY", None)
+
+        # C. pre-tool-use: .env.local
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -390,9 +403,10 @@ def test_antigravity_hooks_contract() -> None:
         )
         handle_pre_tool_use()
         res_env_local = json.loads(out_buf.getvalue().strip())
-        assert res_env_local["decision"] == "deny"
+        assert res_env_local["decision"] == "allow"
+        assert "[Phonix Zero-Trust Gate]" in res_env_local["reason"]
 
-        # D. pre-tool-use: block run_command containing sk_live_...
+        # D. pre-tool-use: run_command containing sk_live_...
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -407,10 +421,10 @@ def test_antigravity_hooks_contract() -> None:
         )
         handle_pre_tool_use()
         res_curl_secret = json.loads(out_buf.getvalue().strip())
-        assert res_curl_secret["decision"] == "deny"
+        assert res_curl_secret["decision"] == "allow"
         assert "[Phonix Zero-Trust Gate]" in res_curl_secret["reason"]
 
-        # E. pre-tool-use: allow benign bounded read_file on non-code files (<= 120 lines)
+        # E. pre-tool-use: allow benign bounded read_file (<= 300 lines)
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -420,7 +434,7 @@ def test_antigravity_hooks_contract() -> None:
         res_allow = json.loads(out_buf.getvalue().strip())
         assert res_allow["decision"] == "allow"
 
-        # F. pre-tool-use: hard-block direct read_file on code files
+        # F. pre-tool-use: read_file on code files with line range is allowed
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -428,8 +442,18 @@ def test_antigravity_hooks_contract() -> None:
         )
         handle_pre_tool_use()
         res_code = json.loads(out_buf.getvalue().strip())
-        assert res_code["decision"] == "deny"
-        assert "[Phonix Hard-Block]" in res_code["reason"]
+        assert res_code["decision"] == "allow"
+
+        # G. pre-tool-use: large file read (>300 lines) gets advisory warning by default
+        out_buf = io.StringIO()
+        sys.stdout = out_buf
+        sys.stdin = io.StringIO(
+            json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/gateway/proxy_server.py"}}})
+        )
+        handle_pre_tool_use()
+        res_large = json.loads(out_buf.getvalue().strip())
+        assert res_large["decision"] == "allow"
+        assert "[Phonix Advisory]" in res_large["reason"]
 
     finally:
         sys.stdin = old_stdin

@@ -259,16 +259,28 @@ def test_agy_lifecycle_hooks() -> None:
     old_stdin = sys.stdin
     old_stdout = sys.stdout
     try:
-        # Block .env
+        # By default (soft advisory mode), accessing .env returns allow with advisory reason
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": ".env"}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_env = json.loads(out_buf.getvalue())
-        assert res_env["decision"] == "deny"
-        assert "Zero-Trust Gate" in res_env["reason"]
+        assert res_env["decision"] == "allow"
+        assert "Zero-Trust" in res_env["reason"]
 
-        # Block malicious exfiltration command
+        # With PHONIX_HARD_DENY=1, it denies
+        os.environ["PHONIX_HARD_DENY"] = "1"
+        try:
+            sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": ".env"}}}))
+            out_buf = io.StringIO()
+            sys.stdout = out_buf
+            handle_pre_tool_use()
+            res_env_deny = json.loads(out_buf.getvalue())
+            assert res_env_deny["decision"] == "deny"
+        finally:
+            os.environ.pop("PHONIX_HARD_DENY", None)
+
+        # Malicious exfiltration command: advisory warning by default, deny with HARD_DENY=1
         sys.stdin = io.StringIO(
             json.dumps(
                 {
@@ -283,45 +295,33 @@ def test_agy_lifecycle_hooks() -> None:
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_cmd = json.loads(out_buf.getvalue())
-        assert res_cmd["decision"] == "deny"
+        assert res_cmd["decision"] == "allow"
+        assert "Zero-Trust" in res_cmd["reason"]
 
-        # Hard-block direct read_file on source code files (.py, .ts, etc.) even when bounded
+        # Normal bounded read_file on source code (<= 300 lines) is allowed
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 50}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_code_bounded = json.loads(out_buf.getvalue())
-        assert res_code_bounded["decision"] == "deny"
-        assert "Phonix Hard-Block" in res_code_bounded["reason"]
+        assert res_code_bounded["decision"] == "allow"
 
-        # Hard-block unbounded full-file read of source code
-        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py"}}}))
+        # Large file read (>300 lines) gets advisory warning by default
+        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/gateway/proxy_server.py"}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_code_unbounded = json.loads(out_buf.getvalue())
-        assert res_code_unbounded["decision"] == "deny"
-        assert "Phonix Hard-Block" in res_code_unbounded["reason"]
+        assert res_code_unbounded["decision"] == "allow"
+        assert "Phonix Advisory" in res_code_unbounded["reason"]
 
-        # Allow bounded read_file on non-code files (e.g. pyproject.toml <= 120 lines)
+        # Allow bounded read_file on non-code files (e.g. pyproject.toml <= 300 lines)
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "pyproject.toml", "StartLine": 1, "EndLine": 50}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_noncode_ok = json.loads(out_buf.getvalue())
         assert res_noncode_ok["decision"] == "allow"
-
-        # Allow read when PHONIX_ALLOW_DIRECT_READ=1 or PHONIX_ALLOW_FULL_READ=1
-        os.environ["PHONIX_ALLOW_DIRECT_READ"] = "1"
-        try:
-            sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 50}}}))
-            out_buf = io.StringIO()
-            sys.stdout = out_buf
-            handle_pre_tool_use()
-            res_bypass = json.loads(out_buf.getvalue())
-            assert res_bypass["decision"] == "allow"
-        finally:
-            os.environ.pop("PHONIX_ALLOW_DIRECT_READ", None)
 
     finally:
         sys.stdin = old_stdin
@@ -766,10 +766,17 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     r1 = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
     assert r1["decision"] == "allow"
 
-    # 2. Consecutive ManageTask polling call is blocked by Anti-Polling Lock
+    # 2. Consecutive ManageTask polling call: warns only by default (PHONIX_HARD_DENY unset)
     r2 = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
-    assert r2["decision"] == "deny"
-    assert "Anti-Polling Lock Tripped" in r2["reason"]
+    assert r2["decision"] == "allow"
+    assert "Anti-Polling" in r2["reason"]
+
+    # When PHONIX_HARD_DENY=1, consecutive ManageTask is denied
+    monkeypatch.setenv("PHONIX_HARD_DENY", "1")
+    r2_deny = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
+    assert r2_deny["decision"] == "deny"
+    assert "Anti-Polling" in r2_deny["reason"]
+    monkeypatch.delenv("PHONIX_HARD_DENY", raising=False)
 
     # Also verify manage_task lowercase alias with action='list'
     r_other = invoke("other_tool", {"dummy": 1})
@@ -777,19 +784,21 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     r_list1 = invoke("manage_task", {"Action": "list"})
     assert r_list1["decision"] == "allow"
     r_list2 = invoke("manage_task", {"Action": "list"})
-    assert r_list2["decision"] == "deny"
-    assert "Anti-Polling Lock Tripped" in r_list2["reason"]
+    assert r_list2["decision"] == "allow"
+    assert "Anti-Polling" in r_list2["reason"]
 
-    # 3. Shell sleep loop is strictly forbidden
+    # 3. Shell sleep loop: warns by default, denies with PHONIX_HARD_DENY=1
     r_sleep1 = invoke("run_command", {"CommandLine": "Start-Sleep -Seconds 5"})
-    assert r_sleep1["decision"] == "deny"
-    assert "Shell sleep loops are strictly forbidden" in r_sleep1["reason"]
+    assert r_sleep1["decision"] == "allow"
+    assert "sleep" in r_sleep1["reason"].lower()
 
+    monkeypatch.setenv("PHONIX_HARD_DENY", "1")
     r_sleep2 = invoke("Bash", {"command": "while true; do sleep 2; done"})
     assert r_sleep2["decision"] == "deny"
-    assert "Shell sleep loops are strictly forbidden" in r_sleep2["reason"]
+    assert "sleep" in r_sleep2["reason"].lower()
+    monkeypatch.delenv("PHONIX_HARD_DENY", raising=False)
 
-    # 4. Turn Budget Circuit Breaker: warn at 25, hard-deny at 40
+    # 4. Turn Budget Circuit Breaker: warn at 25, hard-deny at 40 (only if HARD_DENY=1)
     # Write a state with turn_count = 24
     with open(circuit_file, "r", encoding="utf-8") as f:
         c_state = json.load(f)
@@ -812,10 +821,16 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     with open(circuit_file, "w", encoding="utf-8") as f:
         json.dump(c_state, f)
 
-    # Next tool call increments turn_count to 40 (hard-deny threshold)
+    # Next tool call increments turn_count to 40 (warning by default, deny if HARD_DENY=1)
     r_turn40 = invoke("unrelated_tool", {"action": "compute"})
-    assert r_turn40["decision"] == "deny"
-    assert "Task Turn Budget Exceeded (40 consecutive tool turns)" in r_turn40["reason"]
+    assert r_turn40["decision"] == "allow"
+    assert "Turn Budget" in r_turn40["reason"]
+
+    monkeypatch.setenv("PHONIX_HARD_DENY", "1")
+    r_turn40_deny = invoke("unrelated_tool", {"action": "compute"})
+    assert r_turn40_deny["decision"] == "deny"
+    assert "Turn Budget" in r_turn40_deny["reason"]
+    monkeypatch.delenv("PHONIX_HARD_DENY", raising=False)
 
     # 5. UserPromptSubmit resets turn_count
     from src.agy_hooks import handle_user_prompt_submit
@@ -871,9 +886,23 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     with open(circuit_file, "w", encoding="utf-8") as f:
         json.dump(c_state, f)
 
+    # Warns by default at turn 8
+    r_cfg_warn8 = invoke("unrelated_tool", {"action": "compute"})
+    assert r_cfg_warn8["decision"] == "allow"
+    assert "Turn Budget" in r_cfg_warn8["reason"]
+
+    # Denies when PHONIX_HARD_DENY=1
+    monkeypatch.setenv("PHONIX_HARD_DENY", "1")
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        c_state = json.load(f)
+    c_state["turn_count"] = 7
+    c_state["last_call_timestamp"] = time.time()
+    with open(circuit_file, "w", encoding="utf-8") as f:
+        json.dump(c_state, f)
+
     r_cfg_deny = invoke("unrelated_tool", {"action": "compute"})
     assert r_cfg_deny["decision"] == "deny"
-    assert "Task Turn Budget Exceeded (8 consecutive tool turns)" in r_cfg_deny["reason"]
+    assert "Turn Budget" in r_cfg_deny["reason"]
 
 
 def test_target_mcp_config_preserves_existing_servers(tmp_path: Path) -> None:
