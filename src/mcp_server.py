@@ -17,7 +17,7 @@ import sys
 from typing import Any
 
 from src.gateway.policy_engine import PolicyRequest
-from src.gateway.proxy_server import GatewayCore
+from src.gateway.proxy_server import GatewayCore, _resolve_within
 
 logger = logging.getLogger("phonix.mcp")
 
@@ -471,18 +471,21 @@ class PhonixMCPServer:
                 e_idx = max(start_l, end_l)
 
                 colon_target: Path | None = None
-                if (ws_path / colon_file_part).is_file():
-                    colon_target = ws_path / colon_file_part
-                elif Path(colon_file_part).is_file():
-                    colon_target = Path(colon_file_part)
-                else:
+                try:
+                    resolved_colon = _resolve_within(ws_path, colon_file_part)
+                    if resolved_colon.is_file():
+                        colon_target = resolved_colon
+                except PermissionError:
+                    colon_target = None
+
+                if colon_target is None and not Path(colon_file_part).is_absolute() and ".." not in colon_file_part:
                     target_name = Path(colon_file_part).name.lower()
                     for cand in candidate_files:
                         if cand.name.lower() == target_name:
                             colon_target = cand
                             break
 
-                if colon_target is None:
+                if colon_target is None and not Path(colon_file_part).is_absolute() and ".." not in colon_file_part:
                     try:
                         for cand in ws_path.rglob(f"*{Path(colon_file_part).name}"):
                             if (
@@ -523,9 +526,14 @@ class PhonixMCPServer:
 
             # Case A: Is clean_q a file path in workspace?
             file_match: Path | None = None
-            if (ws_path / clean_q).is_file():
-                file_match = ws_path / clean_q
-            elif " " not in clean_q:
+            try:
+                cand_resolved = _resolve_within(ws_path, clean_q)
+                if cand_resolved.is_file():
+                    file_match = cand_resolved
+            except PermissionError:
+                file_match = None
+
+            if file_match is None and " " not in clean_q and not Path(clean_q).is_absolute() and ".." not in clean_q:
                 for cand in candidate_files:
                     if cand.name.lower() == Path(clean_q).name.lower():
                         file_match = cand
@@ -902,22 +910,29 @@ class PhonixMCPServer:
             return remote
 
         core = self._resolve_active_core(query=file_path, explicit_workspace=workspace_root)
-        ws_path = Path(core.workspace_root)
+        ws_path = Path(core.workspace_root).resolve()
 
-        target = Path(file_path)
-        if not target.is_absolute():
-            target = ws_path / target
+        # 1. Confinement check: resolve path and raise PermissionError unless strictly inside ws_path
+        target = _resolve_within(ws_path, file_path)
         if not target.is_file():
-            # Fallback search in workspace
+            # Fallback search in workspace by filename
+            pattern = Path(file_path).name
             matches = [
-                cand for cand in ws_path.rglob(f"*{Path(file_path).name}")
+                cand for cand in ws_path.rglob(f"*{pattern}")
                 if (
-                    not any(part in cand.parts for part in GatewayCore.IGNORED_DIRS)
+                    cand.is_file()
+                    and not any(part in cand.parts for part in GatewayCore.IGNORED_DIRS)
                     and not any(part in cand.parts for part in STRICT_EXCLUDED_DIRS)
                 )
             ]
-            if matches:
-                target = matches[0]
+            if len(matches) > 1:
+                match_rel_paths = [str(m.relative_to(ws_path)).replace("\\", "/") for m in matches]
+                raise ValueError(
+                    f"Ambiguous file path '{file_path}': found multiple matches in workspace: {match_rel_paths}. "
+                    "Please specify the exact relative path."
+                )
+            elif len(matches) == 1:
+                target = _resolve_within(ws_path, matches[0])
             else:
                 raise FileNotFoundError(f"File '{file_path}' not found in '{ws_path}'")
 
@@ -926,25 +941,12 @@ class PhonixMCPServer:
         content = raw_bytes.decode("utf-8", errors="replace")
 
         applied_count = 0
+        encoding_repaired_count = 0
         for idx, edit in enumerate(edits, start=1):
             target_str = edit.get("target", "")
             replacement_str = edit.get("replacement", "")
             if not target_str:
                 continue
-
-            # Auto-repair Windows MCP client mojibake if target has been decoded via cp1252/latin-1
-            for cand_enc in ("latin-1", "cp1252"):
-                try:
-                    re_t = target_str.encode(cand_enc).decode("utf-8")
-                    if re_t in content or re_t.replace("\r\n", "\n") in content.replace("\r\n", "\n"):
-                        target_str = re_t
-                        try:
-                            replacement_str = replacement_str.encode(cand_enc).decode("utf-8")
-                        except Exception:
-                            pass
-                        break
-                except Exception:
-                    pass
 
             # 1. Exact match attempt
             if target_str in content:
@@ -964,7 +966,53 @@ class PhonixMCPServer:
                 else:
                     content = norm_content
                 applied_count += 1
-            else:
+                continue
+
+            # 3. Encoding auto-repair: only after exact and CRLF-normalized matching fail,
+            # and ONLY if the repaired target appears exactly once in the file.
+            repaired = False
+            for cand_enc in ("latin-1", "cp1252"):
+                try:
+                    re_t = target_str.encode(cand_enc).decode("utf-8")
+                except Exception:
+                    continue
+
+                if not re_t:
+                    continue
+
+                c_count = content.count(re_t)
+                nc_count = norm_content.count(re_t.replace("\r\n", "\n"))
+
+                if c_count == 1:
+                    re_rep = replacement_str
+                    try:
+                        re_rep = replacement_str.encode(cand_enc).decode("utf-8")
+                    except Exception:
+                        pass
+                    content = content.replace(re_t, re_rep, 1)
+                    applied_count += 1
+                    encoding_repaired_count += 1
+                    repaired = True
+                    break
+                elif c_count == 0 and nc_count == 1:
+                    norm_re_t = re_t.replace("\r\n", "\n")
+                    re_rep = replacement_str
+                    try:
+                        re_rep = replacement_str.encode(cand_enc).decode("utf-8")
+                    except Exception:
+                        pass
+                    norm_re_rep = re_rep.replace("\r\n", "\n")
+                    norm_content = norm_content.replace(norm_re_t, norm_re_rep, 1)
+                    if is_crlf:
+                        content = norm_content.replace("\n", "\r\n")
+                    else:
+                        content = norm_content
+                    applied_count += 1
+                    encoding_repaired_count += 1
+                    repaired = True
+                    break
+
+            if not repaired:
                 raise ValueError(
                     f"Edit #{idx} failed: target string not found in '{file_path}'. "
                     f"Target snippet: {target_str[:80]!r}"
@@ -986,8 +1034,9 @@ class PhonixMCPServer:
         except Exception:
             pass
 
+        repair_note = f" (including {encoding_repaired_count} encoding auto-repaired edit(s))" if encoding_repaired_count > 0 else ""
         return (
-            f"[Phonix Surgical Edit] Successfully applied {applied_count}/{len(edits)} edit(s) to '{target.name}' "
+            f"[Phonix Surgical Edit] Successfully applied {applied_count}/{len(edits)} edit(s){repair_note} to '{target.name}' "
             f"({len(content.splitlines())} lines, line endings: {'CRLF' if is_crlf else 'LF'})."
         )
 

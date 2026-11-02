@@ -14,6 +14,8 @@ Wires together the entire end-to-end pipeline:
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -22,6 +24,7 @@ import re
 import sys
 import time
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 import uuid
 
 try:
@@ -61,6 +64,67 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 PHONIX_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """Returns True if the given host string is a recognized loopback address."""
+    if not host:
+        return False
+    h = host.strip().lower()
+    if h.startswith("["):
+        if "]" in h:
+            h = h.split("]")[0].lstrip("[")
+    elif ":" in h:
+        if h.count(":") == 1:
+            h = h.split(":")[0]
+    if h in ("127.0.0.1", "localhost", "::1", "testserver", "testclient"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _resolve_within(ws_root: str | Path, user_path: str | Path) -> Path:
+    """Resolves user_path and raises PermissionError unless it is strictly inside ws_root."""
+    root = Path(ws_root).resolve()
+    target = Path(user_path)
+    if not target.is_absolute():
+        target = root / target
+    resolved_target = target.resolve()
+
+    try:
+        resolved_target.relative_to(root)
+    except ValueError:
+        raise PermissionError(
+            f"Path confinement violation: '{user_path}' resolves to '{resolved_target}', "
+            f"which is outside workspace root '{root}'."
+        )
+    return resolved_target
+
+
+def _authorize_workspace(app: Any, path: str | Path | None) -> Path:
+    """Authorizes workspace path against startup workspace and attached workspaces."""
+    from fastapi import HTTPException
+
+    startup_ws = str(Path(getattr(app.state, "startup_workspace", getattr(getattr(app.state, "core", None), "workspace_root", "."))).resolve())
+    if path is None:
+        return Path(startup_ws)
+
+    resolved = Path(path).resolve()
+    resolved_str = str(resolved)
+
+    allowed = {startup_ws}
+    if hasattr(app.state, "workspaces"):
+        for w in app.state.workspaces.keys():
+            allowed.add(str(Path(w).resolve()))
+
+    if resolved_str not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Unauthorized workspace: '{path}'. Only startup or attached workspaces can be accessed.",
+        )
+    return resolved
 
 
 def _resolve_config_path(path: str | Path | None) -> str | Path | None:
@@ -969,9 +1033,53 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
     )
     core = GatewayCore(workspace_root=workspace_root, auto_index=auto_index)
     app.state.core = core
+    startup_ws = str(Path(workspace_root).resolve())
+    app.state.startup_workspace = startup_ws
+    app.state.bind_host = os.environ.get("PHONIX_HOST", "127.0.0.1")
     app.state.workspaces: dict[str, GatewayCore] = {}
-    if auto_index and os.path.isdir(workspace_root):
-        app.state.workspaces[str(Path(workspace_root).resolve())] = core
+    if os.path.isdir(workspace_root):
+        app.state.workspaces[startup_ws] = core
+
+    @app.middleware("http")
+    async def security_hardening_middleware(request: Any, call_next: Any) -> Any:
+        bind_host = getattr(app.state, "bind_host", os.environ.get("PHONIX_HOST", "127.0.0.1"))
+        is_bound_to_loopback = is_loopback_host(bind_host)
+
+        # 1. Host header validation
+        # While bound to loopback, allow only loopback Host values
+        host_header = request.headers.get("host", "")
+        host_name = host_header.split(":")[0].strip().lower() if host_header else ""
+        if is_bound_to_loopback and host_name:
+            if not is_loopback_host(host_name) and host_name not in ("testserver", "localhost", "127.0.0.1", "::1", "[::1]"):
+                return JSONResponse(
+                    {"detail": f"Host '{host_header}' is not allowed while gateway is bound to loopback."},
+                    status_code=400,
+                )
+
+        # 2. Origin header validation
+        # Reject requests whose Origin is not the same local origin
+        origin = request.headers.get("origin")
+        if origin:
+            parsed_origin = urlparse(origin)
+            origin_host = (parsed_origin.hostname or "").lower()
+            if not is_loopback_host(origin_host) and origin_host not in ("testserver", "localhost", "127.0.0.1", "::1", host_name):
+                return JSONResponse(
+                    {"detail": f"Origin '{origin}' is not an authorized local origin."},
+                    status_code=403,
+                )
+
+        # 3. Client authorization: non-loopback clients must send header X-Phonix-Token equal to PHONIX_API_TOKEN
+        client_host = request.client.host if request.client else "127.0.0.1"
+        if not is_loopback_host(client_host) and client_host not in ("testclient", "localhost", "127.0.0.1", "::1"):
+            token_header = request.headers.get("x-phonix-token", "")
+            expected_token = os.environ.get("PHONIX_API_TOKEN", "")
+            if not expected_token or not hmac.compare_digest(token_header, expected_token):
+                return JSONResponse(
+                    {"detail": "Unauthorized: invalid or missing X-Phonix-Token for non-loopback client."},
+                    status_code=401,
+                )
+
+        return await call_next(request)
 
     # Shared PhonixMCPServer instance for HTTP daemon reuse and multi-project cache
     from src.mcp_server import PhonixMCPServer
@@ -1069,6 +1177,7 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
                 status_code=400, detail=f"Target directory '{target_path}' does not exist or is not a directory."
             )
 
+        _authorize_workspace(app, target_path)
         path_str = str(target_path)
         ok_rule = _ensure_phonix_hp_rule(target_path)
         ok_mcp = _ensure_target_mcp_config(target_path)
@@ -1098,6 +1207,7 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
                 status_code=400, detail=f"Target directory '{target_path}' does not exist or is not a directory."
             )
 
+        _authorize_workspace(app, target_path)
         path_str = str(target_path)
         _clean_phonix_hp_rule(target_path)
         _clean_target_mcp_config(target_path)
@@ -1152,9 +1262,10 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
         path_prefix = str(payload.get("path_prefix", ""))
         max_tokens = int(payload.get("max_tokens", 256))
         ws_root = payload.get("workspace_root")
+        auth_ws = _authorize_workspace(app, ws_root)
 
         text_output = mcp_daemon._tool_repo_map(
-            path_prefix=path_prefix, max_tokens=max_tokens, workspace_root=ws_root
+            path_prefix=path_prefix, max_tokens=max_tokens, workspace_root=str(auth_ws)
         )
 
         tokens = len(text_output) // 4
@@ -1179,13 +1290,14 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
         query = str(payload.get("query", ""))
         max_tokens = int(payload.get("max_tokens", 1536))
         ws_root = payload.get("workspace_root")
+        auth_ws = _authorize_workspace(app, ws_root)
         target_files = payload.get("target_files", [])
         for_edit = bool(payload.get("for_edit", True))
 
         text_output = mcp_daemon._tool_get_pruned_context(
             query=query,
             max_tokens=max_tokens,
-            workspace_root=ws_root,
+            workspace_root=str(auth_ws),
             target_files=target_files,
             for_edit=for_edit,
         )
@@ -1216,11 +1328,12 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
         file_path = str(payload.get("file_path", ""))
         edits = payload.get("edits", [])
         ws_root = payload.get("workspace_root")
+        auth_ws = _authorize_workspace(app, ws_root)
 
         text_output = mcp_daemon._tool_surgical_edit(
             file_path=file_path,
             edits=edits,
-            workspace_root=ws_root,
+            workspace_root=str(auth_ws),
         )
 
         tokens_in = len(str(edits)) // 4

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -26,6 +27,7 @@ from src.gateway.proxy_server import (
     _ensure_phonix_hp_rule,
     _ensure_target_mcp_config,
     create_gateway_app,
+    is_loopback_host,
 )
 
 logging.basicConfig(
@@ -78,12 +80,20 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT, install_hooks: b
 
 
 def run_server(
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8000,
     reload: bool = False,
     install_hooks: bool = False,
 ) -> None:
     """Launches the Phonix v2.0 FastAPI Gateway using Uvicorn."""
+    if not is_loopback_host(host):
+        token = os.environ.get("PHONIX_API_TOKEN")
+        if not token or not token.strip():
+            logger.error("Non-loopback host '%s' requires PHONIX_API_TOKEN environment variable to be set.", host)
+            raise ValueError(f"Non-loopback host '{host}' requires PHONIX_API_TOKEN to be set.")
+
+    os.environ["PHONIX_HOST"] = host
+
     if install_hooks:
         auto_bootstrap_agy_environment(install_hooks=True)
     try:
@@ -395,7 +405,7 @@ def cli_entrypoint() -> None:
 
     # start command
     start_parser = subparsers.add_parser("start", help="Start the gateway server")
-    start_parser.add_argument("--host", default="0.0.0.0", help="Binding host IP")
+    start_parser.add_argument("--host", default="127.0.0.1", help="Binding host IP")
     start_parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
     start_parser.add_argument("--reload", action="store_true", help="Enable hot reload")
     start_parser.add_argument(
