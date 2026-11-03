@@ -113,15 +113,17 @@ flowchart TD
 - **Telemetry Distillation Logger**: Automatically logs live routing and context pruning traces into ChatML SFT format (`data/phonix_router_sft_dataset.jsonl`).
 - **Ollama Modelfile**: Pre-calibrated Modelfile bundling GBNF grammar constraints with 1.2 GB VRAM execution parameters.
 
-### E. Proprietary G-MMU & Stateful Circuit Breaker (`private_moat/`, `src/agy_hooks.py`)
-- **Continuous Gravitational Stratification ($L_0 \to L_3$)**:
-  Unlike Peter Denning's 1968 binary Working Set model ($W(t, \tau)$ where pages are either wholly in RAM or on disk), Phonix's G-MMU introduces 4 deterministic mipmap resolutions:
-  - **$L_0$ Ghost Page Directory** ($d=\infty$): File path, total line count, top-level symbol index. Marked `[G-MMU L3 -> L1: Committed & Verified]` post-edit.
-  - **$L_1$ Sibling Skeletons** ($d=2$): 1-line signatures of sibling functions/classes, preserving type annotations and docstrings while eliding procedural logic.
-  - **$L_2$ Module Imports & Global Constants** ($d=1$): Top-of-file imports and global invariants (`CODE_EXTENSIONS`, `SENSITIVE_FILE_PATTERNS`, `MALICIOUS_COMMAND_PATTERNS`).
-  - **$L_3$ Fovea Verbatim Working Set** ($d=0$, `[Lines X-Y]`): 100% full-fidelity verbatim raw lines for the active edit window.
+### E. G-MMU Architecture: Open-Source Engine vs Proprietary Moat
+- **Open-Source G-MMU Engine (`src/mmu/gmmu.py`)**:
+  - **4-Layer Mipmap Resolution Hierarchy ($L_0 \to L_3$)**:
+    - **$L_0$ Ghost Scope Overview**: File path, line count, byte size, language detection, and module imports summary ($< 50$ tokens).
+    - **$L_1$ Structural Outline**: AST-parsed classes, methods (as `Class.method(args)`), top-level functions, and first-line docstrings (Python stdlib `ast`; JS/TS regex fallback), capped at ~40 entries with a notice.
+    - **$L_2$ Enclosing Context & Scope Isolation**: Captures enclosing class declaration and constructor (`__init__` or `constructor`) or function header so the agent retains class-level types and dependencies.
+    - **$L_3$ Verbatim Edit Window**: Byte-accurate, 1-based line-numbered verbatim source code for the focal edit window preserving exact whitespace.
+- **Proprietary Moat (`private_moat/`, Optional)**:
+  - The public codebase operates 100% standalone without `private_moat/`. An optional `private_moat/` module is reserved for enterprise deployments, holding offline dataset distillation pipelines, neural token compressor training checkpoints, behavioral hotspot analysis, and custom vector search.
 - **Colon Line-Range Syntax**: Queries matching `<file_path>:<start>-<end>` (e.g. `src/agy_hooks.py:130-294`) parse line slices directly before disk checks.
-- **Stateful Circuit Breaker**:
+- **Stateful Circuit Breaker (`src/agy_hooks.py`)**:
   - **Anti-Polling Lock**: Blocks repeated `manage_task` status/list checks ($N \ge 2$) and shell sleep loops (`Start-Sleep`, `while true`, `sleep`).
   - **Task Turn Budget**: Enforces a session-aware turn budget (warns at turn 25, hard-denies at turn 40, configurable via `PHONIX_TURN_WARN`/`PHONIX_TURN_MAX`, resetting on `UserPromptSubmit` or `SessionStart` with 120s idle fallback), preventing runaway spending.
   - **Live Gateway Telemetry**: Exposes `circuit_breaker_trips` and `polling_loops_blocked` in `/health` and `/v1/z3/verify`.
@@ -159,6 +161,7 @@ Phonix/
 │   │   ├── rehydrator.py                  # Response placeholder rehydrator
 │   │   └── audit_telemetry.py             # Compliance audit logger & FinOps metrics
 │   ├── mmu/
+│   │   ├── gmmu.py                        # Public AST-based G-MMU context bundle generator (L0-L3)
 │   │   ├── file_trie.py                   # In-memory File Trie for 0ms speculative I/O
 │   │   ├── speculative_inspector.py       # Streaming HTTP chunk inspector
 │   │   ├── ast_slicer.py                  # Tree-sitter AST slicer (<512 tokens/frame)
@@ -172,6 +175,7 @@ Phonix/
 │       └── circuit_breaker.py             # Cloud handoff & upstream fallback controller
 └── tests/
     ├── test_speculative_trie.py           # Unit tests for FileTrie & 0ms speculative I/O
+    ├── test_gmmu.py                       # Unit tests for public AST G-MMU context bundles
     ├── test_call_graph_pager.py           # Unit tests for CallGraphPager & token limits
     ├── test_semantic_sanitizer.py         # Unit tests for literal sanitization & vault
     ├── test_policy_engine.py              # Unit tests for Z3 formal policy verification

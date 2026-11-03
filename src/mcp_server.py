@@ -423,9 +423,18 @@ class PhonixMCPServer:
                 committed=is_committed,
             )
         except ImportError:
+            from src.mmu.gmmu import render_gmmu_bundle
+
             s_line = line_range[0] if line_range else 1
             e_line = line_range[1] if line_range else len(all_content.splitlines())
-            return f"=== Verbatim Edit Window: {norm_path} [Lines {s_line}-{e_line}] ===\n{snippet}"
+            return render_gmmu_bundle(
+                file_path=norm_path,
+                all_content=all_content,
+                start_line=s_line,
+                end_line=e_line,
+                target_snippet=snippet,
+                committed=is_committed,
+            )
 
     def _extract_verbatim_windows(
         self,
