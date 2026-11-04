@@ -1,37 +1,59 @@
 {
-  "timestamp": "2026-10-27T01:23:22.424140+00:00",
+  "timestamp": "2026-11-04T02:57:45.988408+00:00",
   "phonix_version": "2.1.0",
   "benchmark_1_context_compression": {
     "target_file": "guidesData.ts",
     "target_file_full_path": "D:\\UIT\\NamBonUIT\\pseo-uk-water-hardness\\src\\lib\\guidesData.ts",
+    "token_measurement_method": "estimated (chars/4)",
     "vanilla": {
-      "characters": 590896,
-      "lines": 7166,
-      "tokens": 147724,
-      "cost_claude_sonnet_usd": 0.44317,
-      "cost_gemini_usd": 0.18466
+      "characters": 591261,
+      "lines": 7110,
+      "tokens": 147815,
+      "cost_claude_sonnet_usd": 0.44345,
+      "cost_gemini_usd": 0.18477,
+      "description": "Worst-case vanilla baseline: naive ingestion of full source code buffer into prompt"
+    },
+    "vanilla_worst_case": {
+      "characters": 591261,
+      "lines": 7110,
+      "tokens": 147815,
+      "cost_claude_sonnet_usd": 0.44345,
+      "cost_gemini_usd": 0.18477
+    },
+    "vanilla_realistic": {
+      "characters": 5693,
+      "lines": 80,
+      "tokens": 1423,
+      "cost_claude_sonnet_usd": 0.00427,
+      "cost_gemini_usd": 0.00178,
+      "description": "Realistic vanilla baseline: grep/symbol search + 40-line context range per target slug"
     },
     "phonix": {
-      "characters": 14757,
-      "lines": 187,
-      "tokens": 3689,
-      "cost_claude_sonnet_usd": 0.01107,
-      "cost_gemini_usd": 0.00461,
-      "retrieval_latency_ms": 3091.44
+      "characters": 17432,
+      "lines": 203,
+      "tokens": 4358,
+      "cost_claude_sonnet_usd": 0.01307,
+      "cost_gemini_usd": 0.00545,
+      "retrieval_latency_ms": 3287.43,
+      "description": "Phonix MMU: batched multi-query locator with exact AST boundaries and whitespace preservation"
     },
-    "tokens_saved": 144035,
-    "compression_ratio_pct": 97.5,
-    "cost_reduction_factor": 40.04
+    "tokens_saved": 143457,
+    "compression_ratio_pct": 97.05,
+    "cost_reduction_factor": 33.92
   },
   "benchmark_2_tool_steps_and_reliability": {
     "task_description": "Update metadata and FAQs for 2 articles across guidesData.ts and outcodes/page.tsx",
-    "vanilla_steps": 38,
+    "vanilla_realistic_steps": 8,
+    "vanilla_steps": 25,
     "phonix_steps": 3,
-    "step_reduction_pct": 92.11,
-    "vanilla_cumulative_tokens": 2669500,
-    "phonix_cumulative_tokens": 22500,
-    "cumulative_token_reduction_pct": 99.16,
-    "loop_inflation_factor": 118.64,
+    "step_reduction_pct": 88.0,
+    "realistic_step_reduction_pct": 62.5,
+    "vanilla_cumulative_tokens": 537500,
+    "phonix_cumulative_tokens": 15000,
+    "cumulative_token_reduction_pct": 97.21,
+    "loop_inflation_factor": 35.83,
+    "loop_inflation_model_type": "theoretical_worst_case_model",
+    "loop_inflation_assumptions": "Theoretical worst-case model assuming base system prompt H0=2000 tokens, per-turn delta=1500 tokens, and N=25 trial-and-error retry turns accumulating conversational history.",
     "crlf_edit_success_rate_vanilla_pct": 0.0,
     "crlf_edit_success_rate_phonix_pct": 100.0
   },
@@ -44,7 +66,7 @@
     "true_positive_rate_pct": 100.0,
     "false_positive_rate_pct": 0.0,
     "vanilla_interception_rate_pct": 0.0,
-    "avg_verification_latency_ms": 4.145,
+    "avg_verification_latency_ms": 0.349,
     "z3_formal_proof_status": "SAT / PROVEN_SAFE",
     "detailed_results": [
       {
@@ -54,7 +76,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.724
+        "latency_ms": 0.034
       },
       {
         "id": "B02",
@@ -63,7 +85,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.008
+        "latency_ms": 0.007
       },
       {
         "id": "B03",
@@ -72,7 +94,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.748
+        "latency_ms": 0.093
       },
       {
         "id": "B04",
@@ -81,7 +103,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.01
+        "latency_ms": 0.006
       },
       {
         "id": "B05",
@@ -90,7 +112,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 112.373
+        "latency_ms": 3.909
       },
       {
         "id": "B06",
@@ -99,7 +121,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.023
+        "latency_ms": 0.012
       },
       {
         "id": "B07",
@@ -108,7 +130,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.012
+        "latency_ms": 0.008
       },
       {
         "id": "B08",
@@ -117,7 +139,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.008
+        "latency_ms": 0.005
       },
       {
         "id": "B09",
@@ -126,7 +148,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 4.7
+        "latency_ms": 1.608
       },
       {
         "id": "B10",
@@ -135,7 +157,7 @@
         "is_threat": false,
         "phonix_decision": "allow",
         "vanilla_decision": "allow",
-        "latency_ms": 0.016
+        "latency_ms": 0.008
       },
       {
         "id": "S01",
@@ -144,7 +166,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.005
+        "latency_ms": 0.003
       },
       {
         "id": "S02",
@@ -153,7 +175,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.003
+        "latency_ms": 0.002
       },
       {
         "id": "S03",
@@ -162,7 +184,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 2.013
+        "latency_ms": 1.48
       },
       {
         "id": "S04",
@@ -171,7 +193,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 2.022
+        "latency_ms": 1.573
       },
       {
         "id": "S05",
@@ -180,7 +202,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.013
+        "latency_ms": 0.009
       },
       {
         "id": "S06",
@@ -189,7 +211,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.003
+        "latency_ms": 0.007
       },
       {
         "id": "S07",
@@ -198,7 +220,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.006
+        "latency_ms": 0.012
       },
       {
         "id": "S08",
@@ -207,7 +229,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 1.569
+        "latency_ms": 1.565
       },
       {
         "id": "S09",
@@ -216,7 +238,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.004
+        "latency_ms": 0.007
       },
       {
         "id": "S10",
@@ -225,7 +247,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.048
+        "latency_ms": 0.047
       },
       {
         "id": "M01",
@@ -252,7 +274,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.005
+        "latency_ms": 0.006
       },
       {
         "id": "M04",
@@ -261,7 +283,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.004
+        "latency_ms": 0.005
       },
       {
         "id": "M05",
@@ -270,7 +292,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.004
+        "latency_ms": 0.006
       },
       {
         "id": "M06",
@@ -279,7 +301,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.004
+        "latency_ms": 0.006
       },
       {
         "id": "M07",
@@ -288,7 +310,7 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.003
+        "latency_ms": 0.004
       },
       {
         "id": "M08",
@@ -315,18 +337,20 @@
         "is_threat": true,
         "phonix_decision": "deny",
         "vanilla_decision": "allow",
-        "latency_ms": 0.017
+        "latency_ms": 0.018
       }
     ]
   },
   "benchmark_4_hardware_footprint": {
     "vram_budget_limit_mb": 1228.8,
     "vram_constraint_satisfied": true,
-    "peak_rss_ram_mb": 72.59,
-    "slm_routing_latency_ms": 5284.28,
-    "ast_cache_hit_latency_ms": 0.061,
+    "peak_rss_ram_mb": 72.54,
+    "slm_routing_latency_ms": 0.25,
+    "ast_cache_hit_latency_ms": 0.02,
     "deterministic_gbnf_enforced": true,
     "slm_task_category": "code_completion",
-    "slm_complexity_score": 0.35
+    "slm_complexity_score": 0.35,
+    "slm_role_description": "On-device frame relevance pruning and task complexity scoring (distinct from Z3 proofs and AST heuristics)",
+    "slm_runtime_mode": "heuristic_fallback_ready"
   }
 }

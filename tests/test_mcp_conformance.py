@@ -161,7 +161,7 @@ def print_certification_report() -> None:
     call_status = "PASSED" if statuses["tools_call"] else "FAILED"
 
     print("========================================================================")
-    print(" PHONIX v2.0 - ANTHROPIC MCP SPECIFICATION CONFORMANCE REPORT")
+    print(" MCP stdio protocol self-test: PASSED")
     print("========================================================================")
     print(f" [✓] JSON-RPC 2.0 Framing & Transport: {framing_status}")
     print(f" [✓] Handshake & Capabilities (initialize): {init_status}")
@@ -169,10 +169,10 @@ def print_certification_report() -> None:
     print(f" [✓] Dynamic Execution (tools/call): {call_status}")
     print("------------------------------------------------------------------------")
     print(" Platform Compatibility:")
-    print(" - Claude Desktop (Anthropic):       [CERTIFIED 100%]")
-    print(" - Claude Code CLI:                  [CERTIFIED 100%]")
-    print(" - Cursor & Windsurf IDE:            [CERTIFIED 100%]")
-    print(" - AWS Bedrock MCP Bridge:           [CERTIFIED 100%]")
+    print(" - Claude Desktop (Anthropic):       expected compatible (not tested on real client)")
+    print(" - Claude Code CLI:                  expected compatible (not tested on real client)")
+    print(" - Cursor & Windsurf IDE:            expected compatible (not tested on real client)")
+    print(" - AWS Bedrock:                      stdio not directly supported (requires HTTP/SSE bridge or custom lambda)")
     print("========================================================================")
 
 

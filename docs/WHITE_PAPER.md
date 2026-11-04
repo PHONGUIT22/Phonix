@@ -138,6 +138,8 @@ Rather than relying on non-deterministic LLM "system prompts" to enforce securit
 For intent routing and semantic triage, Phonix deploys a quantized 1.5B SLM (Qwen2.5-Coder-1.5B Q4_K_M):
 - **VRAM Constraint**: Strictly locked to **1.2 GB VRAM** (model footprint: 986 MB).
 - **GBNF Grammar Locking**: Enforces context-free grammar constraints (`router_decision.gbnf`) at the decoding layer. The SLM cannot generate conversational chatter; it deterministically emits JSON specifying `selected_ast_frames`, `dropped_ast_frames`, `complexity_score`, and `requires_cloud_handoff`.
+- **Architectural Demarcation**: The micro-router is specialized strictly for candidate AST frame relevance pruning and task complexity scoring. It does NOT perform formal zero-trust policy verification (which is mathematically proven via the Z3 SMT solver) or raw AST parsing (performed deterministically by Python AST / tree-sitter).
+- **Open-Source Heuristic Fallback**: In open-source or resource-constrained environments where a local Ollama/vLLM daemon is not running, Phonix automatically falls back to deterministic AST heuristics and keyword-relevance scoring without breaking workflow execution.
 
 ### 2.6 Proprietary G-MMU: Continuous Gravitational Stratification ($L_0 \to L_3$) vs. Denning's 1968 Working Set
 In 1968, Peter J. Denning established the foundation of virtual memory management with the **Working Set Model of Program Behavior**, defining a process's working set $W(t, \tau)$ as the set of memory pages referenced during the process-time interval $(t-\tau, t)$. In operating system architecture, this formulation is strictly **binary**: a virtual page is either physically mapped into fast Random Access Memory (RAM) or paged out to secondary persistent storage (disk).
@@ -174,32 +176,34 @@ Under Denning's model, a page remains in $W(t, \tau)$ until evicted by an LRU ti
 ## 3. Empirical Evaluation & Benchmark Results
 
 ### 3.1 Experimental Methodology
-Benchmarks were conducted on a developer workstation running Windows 11, AMD Ryzen 7, 32GB RAM, Python 3.13.7. The target benchmark artifact is `pseo-uk-water-hardness/src/lib/guidesData.ts` (7,166 lines, 590,896 characters, ~147,724 tokens), representing a production-grade pSEO dataset registry.
+Benchmarks were conducted on a developer workstation running Windows 11, AMD Ryzen 7, 32GB RAM, Python 3.13.7. The target benchmark artifact is `pseo-uk-water-hardness/src/lib/guidesData.ts` (7,110 lines, 591,261 characters, ~147,815 tokens), representing a production-grade pSEO dataset registry.
 
 The evaluation compares:
-- **Baseline (Vanilla Agent)**: Unbounded tool reads, unbatched sequential exploration, native `edit_file` without CRLF normalization, and unguarded shell execution.
-- **Phonix v2.1**: Context MMU multi-query locator, `phonix_surgical_edit`, Z3 formal policy gate, and on-device micro-router.
+- **Baseline (Vanilla Agent - Worst-Case)**: Naive full file reads loading complete monolithic files into the prompt context buffer.
+- **Baseline (Vanilla Agent - Realistic)**: Targeted grep/symbol lookup + bounded range read (~40 lines context range around target symbols).
+- **Phonix v2.1 Context MMU**: Multi-query locator returning continuous stratified AST frames ($L_0 \to L_3$), `phonix_surgical_edit` with atomic CRLF normalization, Z3 formal policy gate, and on-device micro-router.
 
 ### 3.2 Benchmark 1: Context Ingestion & Token Compression
 
-| Metric | Vanilla Agent (Baseline) | Phonix v2.1 Context MMU | Improvement / Factor |
-| :--- | :---: | :---: | :---: |
-| **Ingested Characters** | 590,896 | **14,757** | **-97.50%** |
-| **Ingested Lines** | 7,166 | **187** | **-97.39%** |
-| **Ingested Tokens** | 147,724 | **3,689** | **-97.50%** |
-| **Tokens Saved per Read** | 0 | **144,035** | **144,035 tokens saved** |
-| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4432 | **$0.0111** | **40.04$\times$ Cheaper** |
-| **Ingestion Cost (Gemini 2.0 Flash)** | $0.1847 | **$0.0046** | **40.04$\times$ Cheaper** |
-| **Retrieval Latency** | 120 ms (disk read) | **3,176.71 ms** (AST indexing + parse) | Deterministic sub-4s |
+| Metric | Vanilla Full Read (Worst-Case) | Vanilla Grep + Range (Realistic) | Phonix v2.1 Context MMU | Improvement / Factor |
+| :--- | :---: | :---: | :---: | :---: |
+| **Ingested Characters** | 591,261 | 5,692 | **17,432** | **-97.05%** vs full read |
+| **Ingested Lines** | 7,110 | 80 | **210** | **-97.05%** vs full read |
+| **Ingested Tokens** | 147,815 | 1,423 | **4,358** | **-97.05%** vs full read |
+| **Tokens Saved per Read** | 0 | 146,392 | **143,457** | Full AST context preserved |
+| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4435 | $0.0043 | **$0.0131** | **33.92$\times$ Cheaper** vs full read |
+| **Ingestion Cost (Gemini 2.0 Flash)** | $0.1848 | $0.0018 | **$0.0054** | **33.92$\times$ Cheaper** vs full read |
+| **Retrieval Latency** | 120 ms (raw disk) | 850 ms (grep + slice) | **3,347.63 ms** (AST index + parse) | Deterministic sub-4s |
 
 ```text
 Context Ingestion Volume (Tokens per Ingestion):
-  Vanilla (Full Read):  [████████████████████████████████████████] 147,724 tokens
-  Phonix MMU v2.1:      [█                                       ] 3,689 tokens (-97.50%)
+  Vanilla Full Read (Worst Case):  [████████████████████████████████████████] 147,815 tokens
+  Vanilla Grep + Range (Realistic):[█                                       ] 1,423 tokens
+  Phonix MMU v2.1 (Full AST Window):[█                                       ] 4,358 tokens (-97.05% vs full read)
 ```
 
 #### Mathematical Formulation: Compression Ratio ($C_r$)
-$$C_r = \left(1 - \frac{T_{\text{Phonix}}}{T_{\text{Vanilla}}}\right) \times 100\% = \left(1 - \frac{3,689}{147,724}\right) \times 100\% = \mathbf{97.50\%}$$
+$$C_r = \left(1 - \frac{T_{\text{Phonix}}}{T_{\text{Vanilla, Worst-Case}}}\right) \times 100\% = \left(1 - \frac{4,358}{147,815}\right) \times 100\% = \mathbf{97.05\%}$$
 
 ---
 
@@ -207,24 +211,23 @@ $$C_r = \left(1 - \frac{T_{\text{Phonix}}}{T_{\text{Vanilla}}}\right) \times 100
 
 To measure multi-turn agent dynamics, we evaluated the task: *"Update metadata and FAQs for articles 'does-scotland-have-hard-water' and 'uk-business-water-suppliers-guide' in guidesData.ts, and add outbound link in outcodes/page.tsx."*
 
-| Metric | Vanilla Agent (Baseline) | Phonix v2.1 Gateway | Improvement / Margin |
-| :--- | :---: | :---: | :---: |
-| **Total Conversational Turns** | 38 turns | **3 turns** | **-92.11%** (35 turns saved) |
-| **First-Try Edit Success Rate** | 0.0% (CRLF failure) | **100.0%** (Normalized) | **+100.0%** reliability |
-| **Turn 1 Transmitted Context** | 2,000 tokens | 2,000 tokens | Base prompt identical |
-| **Average Incremental Turn Context ($\Delta$)** | 3,500 tokens | 2,750 tokens | -21.4% per turn |
-| **Cumulative Incurred Tokens** | **2,669,500 tokens** | **22,500 tokens** | **-99.16%** token drop |
-| **Cumulative Cost (Claude 3.7 Sonnet)** | **$8.0085** | **$0.0675** | **$7.94 saved per task** |
-| **Loop Inflation Factor ($L_f$)** | **118.64$\times$** | **1.00$\times$** | **118.64$\times$ inflation avoided** |
+| Metric | Vanilla Realistic (Clean) | Vanilla Retry Loop (Trial-and-Error) | Phonix v2.1 Gateway | Improvement / Margin |
+| :--- | :---: | :---: | :---: | :---: |
+| **Total Conversational Turns** | 8 turns | 25 turns | **3 turns** | **-62.5%** vs clean, **-88.0%** vs retry |
+| **First-Try Edit Success Rate** | 100.0% | 0.0% (CRLF failure) | **100.0%** (Normalized) | **+100.0%** reliability |
+| **Cumulative Incurred Tokens (Model)** | 76,000 tokens | **537,500 tokens** | **15,000 tokens** | **-97.21%** token drop |
+| **Cumulative Cost (Claude 3.7 Sonnet)** | $0.2280 | **$1.6125** | **$0.0450** | **35.83$\times$ Cheaper** |
+| **Loop Inflation Factor ($L_f$)** | 5.07$\times$ | **35.83$\times$** | **1.00$\times$** | **35.83$\times$ inflation avoided** |
 
 ```text
-Cumulative Conversational Context (Loop Inflation):
-  Vanilla Agent Loop:   [████████████████████████████████████████] 2,669,500 tokens
-  Phonix v2.1 (1-Step): [█                                       ] 22,500 tokens (-99.16%)
+Cumulative Conversational Context (Theoretical Worst-Case Model):
+  Vanilla Retry Loop (25 turns):   [████████████████████████████████████████] 537,500 tokens
+  Phonix v2.1 Batched (3 turns):   [█                                       ] 15,000 tokens (-97.21%)
 
 Agent Tool Turns to Complete Multi-File Task:
-  Vanilla Trial-and-Error:  [████████████████████████████████████████] 38 tool calls
-  Phonix v2.1 Batched:      [███                                     ] 3 tool calls (-92.11%)
+  Vanilla Clean Workflow:          [██████████                              ] 8 tool calls
+  Vanilla Trial-and-Error Loop:    [████████████████████████████████████████] 25 tool calls
+  Phonix v2.1 Batched:             [████                                    ] 3 tool calls (-62.5% vs clean)
 ```
 
 #### Mathematical Formulation: Loop Inflation Factor ($L_f$)
@@ -232,7 +235,9 @@ In multi-turn autonomous coding agents, each conversational turn $k$ re-transmit
 
 $$T_{\text{cumulative}} = \sum_{k=1}^N \left(H_0 + k \cdot \Delta\right) = N \cdot H_0 + \frac{N(N + 1)}{2} \cdot \Delta$$
 
-$$L_f = \frac{T_{\text{cumulative, Vanilla}}}{T_{\text{cumulative, Phonix}}} = \frac{2,669,500}{22,500} = \mathbf{118.64\times}$$
+$$L_f = \frac{T_{\text{cumulative, Vanilla}}}{T_{\text{cumulative, Phonix}}} = \frac{537,500}{15,000} = \mathbf{35.83\times}$$
+
+*Explicit Model Assumptions:* Base system prompt $H_0 = 2000$ tokens, average turn context increment $\Delta = 1500$ tokens, evaluated across $N = 25$ trial-and-error retry turns caused by line-guessing and Windows CRLF string replacement mismatch.
 
 ---
 

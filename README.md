@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-brightgreen.svg)](pyproject.toml)
 [![Architecture](https://img.shields.io/badge/Architecture-Context%20MMU%20%2B%201.5B%20Micro--Router-purple.svg)](ARCHITECTURE.md)
 [![Whitepaper](https://img.shields.io/badge/Whitepaper-Technical%20Report-red.svg)](docs/WHITE_PAPER.md)
-[![Benchmark](https://img.shields.io/badge/Benchmark-97.50%25%20Tokens%20Saved-brightgreen.svg)](docs/BENCHMARK_REPORT.md)
+[![Benchmark](https://img.shields.io/badge/Benchmark-97.05%25%20Tokens%20Saved-brightgreen.svg)](docs/BENCHMARK_REPORT.md)
 
 ---
 
@@ -15,32 +15,35 @@
 
 > 📄 **[Read the Full Technical Whitepaper (`docs/WHITE_PAPER.md`)](docs/WHITE_PAPER.md)** | 📊 **[Reproducible Benchmark Suite & Report (`docs/BENCHMARK_REPORT.md`)](docs/BENCHMARK_REPORT.md)**
 
-Tested head-to-head against vanilla agentic execution on a production 7,166-line pSEO codebase (`guidesData.ts`, 590,896 characters):
+Tested head-to-head against vanilla agentic execution on a production 7,110-line pSEO codebase (`guidesData.ts`, 591,261 characters):
 
 | Evaluation Dimension | Vanilla Agent (Baseline) | Phonix v2.1 Gateway | Realized Margin | Status |
 | :--- | :---: | :---: | :---: | :---: |
-| **Context Ingestion Volume** | 147,724 tokens | **3,689 tokens** | **-97.50%** (40.04x compression) | ✅ Verified |
-| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4432 | **$0.0111** | **40.04x Cheaper** | ⚡ Realized |
-| **Agent Tool Execution Turns** | 38 turns | **3 turns** | **-92.11%** turns | ✅ Verified |
-| **Cumulative Context (Loop Inflation)** | 2,669,500 tokens | **22,500 tokens** | **-99.16%** (118.6x inflation avoided) | ⚡ Realized |
+| **Context Ingestion: Worst-Case (Full Read)** | 147,815 tokens | **4,358 tokens** | **-97.05%** (33.92x compression) | ✅ Verified |
+| **Context Ingestion: Realistic (Grep + 40-Line Range)** | 1,423 tokens | **4,358 tokens** | Full AST outline + enclosing scope in 1 call | ✅ Verified |
+| **Ingestion Cost (Claude 3.7 Sonnet)** | $0.4435 | **$0.0131** | **33.92x Cheaper** vs full read | ⚡ Realized |
+| **Agent Tool Execution Turns: Clean Workflow** | 8 turns | **3 turns** | **-62.5%** steps (8 $\to$ 3) | ✅ Verified |
+| **Agent Tool Execution Turns: Trial-and-Error** | 25 turns | **3 turns** | **-88.0%** steps (25 $\to$ 3) | ✅ Verified |
+| **Cumulative Context (Theoretical Worst-Case)** | 537,500 tokens | **15,000 tokens** | **-97.21%** (35.83x inflation avoided) | ⚡ Modeled |
 | **CRLF Multi-Hunk Edit Success** | 0% (Mismatch failure) | **100%** (Atomic normalization) | **+100.0%** reliability | ✅ Verified |
 | **Zero-Trust Threat Interception** | 0.0% (Total leakage) | **100.0%** (20/20 blocked) | **Zero False Negatives** | 🛡️ Protected |
 | **Security False Positive Rate** | N/A | **0.0%** (10/10 allowed) | **Zero False Positives** | 🛡️ Verified |
-| **Verification Latency Overhead** | 0.00 ms | **2.01 ms** | **Deterministic (< 2.5ms)** | ⚡ Realized |
-| **Hardware Memory Footprint** | Unbounded | **72.6 MB / 1,228.8 MB** | **Strict Edge Cap Satisfied** | ✅ Verified |
+| **Verification Latency Overhead** | 0.00 ms | **2.08 ms** | **Deterministic (< 2.5ms)** | ⚡ Realized |
+| **Hardware Memory Footprint** | Unbounded | **72.59 MB / 1,228.8 MB** | **Strict Edge Cap Satisfied** | ✅ Verified |
 
 ```text
 Context Ingestion Volume (Tokens per Read):
-  Vanilla (Full Read):  [████████████████████████████████████████] 147,724 tokens
-  Phonix MMU v2.1:      [█                                       ] 3,689 tokens (-97.50%)
+  Vanilla Full Read (Worst-Case):  [████████████████████████████████████████] 147,815 tokens
+  Vanilla Grep + Range (Realistic):[█                                       ] 1,423 tokens
+  Phonix MMU v2.1 (Full AST Window):[█                                       ] 4,358 tokens (-97.05% vs full read)
 
-Cumulative Conversational Tokens (Loop Inflation):
-  Vanilla Agent Loop:   [████████████████████████████████████████] 2,669,500 tokens
-  Phonix v2.1 (1-Step): [█                                       ] 22,500 tokens (-99.16%)
+Cumulative Conversational Tokens (Theoretical Worst-Case Model):
+  Vanilla Retry Loop (25 turns):   [████████████████████████████████████████] 537,500 tokens
+  Phonix v2.1 Batched (3 turns):   [█                                       ] 15,000 tokens (-97.21%)
 
 Zero-Trust Threat Interception Rate:
-  Vanilla Agent:        [                                        ] 0.0% (Passed all 20 threat vectors)
-  Phonix Zero-Trust:    [████████████████████████████████████████] 100.0% (20/20 threats blocked)
+  Vanilla Agent:                   [                                        ] 0.0% (Passed all 20 threat vectors)
+  Phonix Zero-Trust:               [████████████████████████████████████████] 100.0% (20/20 threats blocked)
 ```
 
 ### ⚡ What's New in Phonix v2.1
@@ -99,8 +102,10 @@ flowchart TD
 ### B. 1.5B Micro-Router (`src/micro_router/`)
 - **Resource Footprint**: Constrained to a strict **1.2GB VRAM envelope** using Q4_K_M quantization (Qwen2.5-Coder-1.5B or Llama-3.2-1B-Instruct).
 - **Strict GBNF Grammar Locking (`router_decision.gbnf`)**: Constrains SLM decoding to perform **ONLY two tasks**:
-  1. **AST Context Pruning**: Selects relevant frames and prunes irrelevant context.
-  2. **Complexity Scoring for Circuit Breaking**: Outputs normalized score `[0.0 - 1.0]` and `trigger_cloud_handoff` flag.
+  1. **Candidate AST Context Pruning**: Evaluates candidate AST frames to select relevant snippets and prune irrelevant context.
+  2. **Task Complexity Scoring**: Outputs normalized score `[0.0 - 1.0]` and `trigger_cloud_handoff` flag for circuit breaking and routing.
+- **Architectural Demarcation**: The micro-router is specialized strictly for candidate AST frame pruning and complexity scoring. It is completely distinct from formal Z3 policy proofs (handled mathematically by `PolicyEngine`) and raw AST parsing (handled deterministically by tree-sitter / Python AST).
+- **Deterministic Heuristic Fallback**: In open-source environments where a local Ollama or vLLM daemon is not configured or running, Phonix seamlessly falls back to fast, deterministic AST heuristics without breaking any gateway, MCP, or proxy functionality.
 
 ### C. Enterprise Compliance Gateway (`src/gateway/`)
 - **OpenAI/Anthropic Compatible Proxy (`/v1/chat/completions`)**: Drop-in proxy for Cursor, Claude Code, VS Code, continue.dev, and corporate agent frameworks.
