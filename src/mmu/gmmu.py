@@ -361,3 +361,96 @@ def render_gmmu_bundle(
     )
 
     return f"{l0}\n\n{l1}\n\n{l2}\n\n{l3}"
+
+
+def render_gmmu_grouped_bundle(
+    file_path: str,
+    all_content: str,
+    windows: list[tuple[int, int, str | None]],
+    committed: bool = False,
+    detail: str = "standard",
+) -> str:
+    """Renders one or more verbatim windows for a single file without duplicating L0/L1/L2.
+
+    - detail="minimal": emits concise 1-line header `--- <rel_path> [Lines X-Y / Total Z] ---`
+      + exact verbatim source lines.
+    - detail="standard" | "full": renders L0 + L1 + L2 once per file, followed by all
+      [Lines X-Y] verbatim windows for that file.
+    """
+    norm_path = file_path.replace("\\", "/")
+    lines = all_content.splitlines()
+    total_lines = len(lines)
+    committed_tag = " [Committed]" if committed else ""
+
+    if detail == "minimal":
+        parts: list[str] = []
+        for start_line, end_line, target_snippet in windows:
+            s_line = max(1, start_line)
+            e_line = min(total_lines, max(s_line, end_line))
+            verbatim_code = (
+                target_snippet
+                if target_snippet is not None
+                else ("\n".join(lines[s_line - 1 : e_line]) if lines else "")
+            )
+            parts.append(
+                f"--- {norm_path} [Lines {s_line}-{e_line} / Total {total_lines}]{committed_tag} ---\n"
+                f"{verbatim_code}"
+            )
+        return "\n\n".join(parts)
+
+    if not windows:
+        return ""
+
+    byte_size = len(all_content.encode("utf-8"))
+    language = detect_language(norm_path)
+    imports_summary = _extract_imports_summary(all_content, language)
+    committed_banner = "\n[G-MMU L3 -> L1: Committed & Verified]" if committed else ""
+    l0 = (
+        f"=== [G-MMU L0: Ghost Scope Overview] ==={committed_banner}\n"
+        f"File: {norm_path} ({total_lines} total lines, {byte_size} bytes, Language: {language})\n"
+        f"Imports: {imports_summary}"
+    )
+
+    if language == "Python":
+        raw_symbols = _extract_python_symbols(all_content)
+    elif language in ("TypeScript", "JavaScript"):
+        raw_symbols = _extract_jsts_symbols(all_content)
+    else:
+        raw_symbols = _extract_regex_symbols(all_content)
+
+    max_symbols = 20 if detail == "standard" else 40
+    if len(raw_symbols) > max_symbols:
+        remaining = len(raw_symbols) - max_symbols
+        displayed_symbols = raw_symbols[:max_symbols] + [f"... and {remaining} more symbols"]
+    elif raw_symbols:
+        displayed_symbols = raw_symbols
+    else:
+        displayed_symbols = ["# (no symbols detected)"]
+
+    l1 = (
+        "=== [G-MMU L1: Structural Outline (Symbols & Dependencies)] ===\n"
+        + "\n".join(displayed_symbols)
+    )
+
+    first_s = max(1, windows[0][0])
+    first_e = min(total_lines, max(first_s, windows[0][1]))
+    enclosing_text = _find_enclosing_context(all_content, first_s, first_e, language)
+    l2 = f"=== [G-MMU L2: Enclosing Context & Scope Isolation] ===\n{enclosing_text}"
+
+    l3_parts: list[str] = []
+    for start_line, end_line, target_snippet in windows:
+        s_line = max(1, start_line)
+        e_line = min(total_lines, max(s_line, end_line))
+        line_range_str = f"[Lines {s_line}-{e_line}]"
+        verbatim_code = (
+            target_snippet
+            if target_snippet is not None
+            else ("\n".join(lines[s_line - 1 : e_line]) if lines else "")
+        )
+        l3_parts.append(
+            f"=== [G-MMU L3: Verbatim Edit Window: {norm_path} {line_range_str}] ===\n"
+            f"=== Verbatim Edit Window: {norm_path} {line_range_str} ===\n"
+            f"{verbatim_code}"
+        )
+
+    return f"{l0}\n\n{l1}\n\n{l2}\n\n" + "\n\n".join(l3_parts)

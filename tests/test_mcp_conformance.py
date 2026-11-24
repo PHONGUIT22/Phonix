@@ -95,6 +95,8 @@ def _run_conformance_checks(workspace_arg: str | None = None) -> dict[str, bool]
             "phonix_get_pruned_context",
             "phonix_surgical_edit",
             "phonix_verify_zero_trust",
+            "phonix_symbol_impact",
+            "phonix_run_compact",
         }
         assert required_tools.issubset(tool_names), f"Missing tools: {required_tools - tool_names}"
         results["tools_list"] = True
@@ -165,7 +167,7 @@ def print_certification_report() -> None:
     print("========================================================================")
     print(f" [✓] JSON-RPC 2.0 Framing & Transport: {framing_status}")
     print(f" [✓] Handshake & Capabilities (initialize): {init_status}")
-    print(f" [✓] Tool Discovery (tools/list - 4 Tools): {tools_status}")
+    print(f" [✓] Tool Discovery (tools/list - 6 Tools): {tools_status}")
     print(f" [✓] Dynamic Execution (tools/call): {call_status}")
     print("------------------------------------------------------------------------")
     print(" Platform Compatibility:")

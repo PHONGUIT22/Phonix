@@ -292,6 +292,10 @@ def test_mcp_server_protocol_and_tools() -> None:
     assert "phonix_repo_map" in tool_names
     assert "phonix_get_pruned_context" in tool_names
     assert "phonix_verify_zero_trust" in tool_names
+    assert "phonix_surgical_edit" in tool_names
+    assert "phonix_symbol_impact" in tool_names
+    assert "phonix_run_compact" in tool_names
+    assert len(tool_names) == 6
 
     # 3. tools/call: phonix_repo_map (with path_prefix filter)
     map_res = server.handle_request(
@@ -351,38 +355,52 @@ def test_mcp_server_protocol_and_tools() -> None:
 # Test 5: Antigravity Hooks Contract (src/agy_hooks.py)
 # -------------------------------------------------------------------------
 def test_antigravity_hooks_contract() -> None:
-    """Verifies session-start injectSteps output and pre-tool-use allow/deny decisions."""
+    """Verifies session-start zero-tax default/opt-in and pre-tool-use tiered allow/deny decisions."""
     old_stdin = sys.stdin
     old_stdout = sys.stdout
 
     try:
-        # A. session-start subcommand must emit valid injectSteps with systemMessage
+        # A1. session-start default: zero-tax {} (0 injected tokens)
+        os.environ.pop("PHONIX_INJECT_MAP", None)
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(json.dumps({"conversationId": "test-conv-001"}))
 
         ret = handle_session_start(workspace_root=".")
         assert ret == 0
+        session_default = json.loads(out_buf.getvalue().strip())
+        assert session_default == {}
 
-        session_out = json.loads(out_buf.getvalue().strip())
-        assert "injectSteps" in session_out
-        assert len(session_out["injectSteps"]) >= 1
-        sys_msg = session_out["injectSteps"][0]["systemMessage"]["systemMessage"]
-        assert "[Phonix v2.0 Context MMU Active]" in sys_msg
-        assert "phonix_get_pruned_context" in sys_msg
+        # A2. session-start opt-in (PHONIX_INJECT_MAP=1): emits injectSteps with systemMessage
+        os.environ["PHONIX_INJECT_MAP"] = "1"
+        try:
+            out_buf = io.StringIO()
+            sys.stdout = out_buf
+            sys.stdin = io.StringIO(json.dumps({"conversationId": "test-conv-001"}))
+            ret = handle_session_start(workspace_root=".")
+            assert ret == 0
+            session_out = json.loads(out_buf.getvalue().strip())
+            assert "injectSteps" in session_out
+            assert len(session_out["injectSteps"]) >= 1
+            sys_msg = session_out["injectSteps"][0]["systemMessage"]["systemMessage"]
+            assert "[Phonix v2.0 Context MMU Active]" in sys_msg
+            assert "phonix_get_pruned_context" in sys_msg
+        finally:
+            os.environ.pop("PHONIX_INJECT_MAP", None)
 
-        # B. pre-tool-use: by default allow with advisory warning, with PHONIX_HARD_DENY=1 deny
+        # B. pre-tool-use: hard-denies .env by default; PHONIX_SOFT_MODE=1 softens to allow
+        os.environ.pop("PHONIX_SOFT_MODE", None)
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
             json.dumps({"toolCall": {"name": "read_file", "args": {"Path": ".env"}}})
         )
         handle_pre_tool_use()
-        res_env = json.loads(out_buf.getvalue().strip())
-        assert res_env["decision"] == "allow"
-        assert "[Phonix Zero-Trust Gate]" in res_env["reason"]
+        res_env_deny = json.loads(out_buf.getvalue().strip())
+        assert res_env_deny["decision"] == "deny"
+        assert "[Phonix Zero-Trust Gate]" in res_env_deny["reason"]
 
-        os.environ["PHONIX_HARD_DENY"] = "1"
+        os.environ["PHONIX_SOFT_MODE"] = "1"
         try:
             out_buf = io.StringIO()
             sys.stdout = out_buf
@@ -390,12 +408,13 @@ def test_antigravity_hooks_contract() -> None:
                 json.dumps({"toolCall": {"name": "read_file", "args": {"Path": ".env"}}})
             )
             handle_pre_tool_use()
-            res_env_deny = json.loads(out_buf.getvalue().strip())
-            assert res_env_deny["decision"] == "deny"
+            res_env_soft = json.loads(out_buf.getvalue().strip())
+            assert res_env_soft["decision"] == "allow"
+            assert "[Phonix Zero-Trust Gate]" in res_env_soft["reason"]
         finally:
-            os.environ.pop("PHONIX_HARD_DENY", None)
+            os.environ.pop("PHONIX_SOFT_MODE", None)
 
-        # C. pre-tool-use: .env.local
+        # C. pre-tool-use: .env.local denied by default
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -403,10 +422,10 @@ def test_antigravity_hooks_contract() -> None:
         )
         handle_pre_tool_use()
         res_env_local = json.loads(out_buf.getvalue().strip())
-        assert res_env_local["decision"] == "allow"
+        assert res_env_local["decision"] == "deny"
         assert "[Phonix Zero-Trust Gate]" in res_env_local["reason"]
 
-        # D. pre-tool-use: run_command containing sk_live_...
+        # D. pre-tool-use: run_command containing sk_live_... denied by default
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -421,10 +440,10 @@ def test_antigravity_hooks_contract() -> None:
         )
         handle_pre_tool_use()
         res_curl_secret = json.loads(out_buf.getvalue().strip())
-        assert res_curl_secret["decision"] == "allow"
+        assert res_curl_secret["decision"] == "deny"
         assert "[Phonix Zero-Trust Gate]" in res_curl_secret["reason"]
 
-        # E. pre-tool-use: allow benign bounded read_file (<= 300 lines)
+        # E. pre-tool-use: allow benign bounded read_file (<= 400 lines)
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -434,17 +453,17 @@ def test_antigravity_hooks_contract() -> None:
         res_allow = json.loads(out_buf.getvalue().strip())
         assert res_allow["decision"] == "allow"
 
-        # F. pre-tool-use: read_file on code files with line range is allowed
+        # F. pre-tool-use: read_file on code files with bounded line range (<= 400 lines) is allowed
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
-            json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 50}}})
+            json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 350}}})
         )
         handle_pre_tool_use()
         res_code = json.loads(out_buf.getvalue().strip())
         assert res_code["decision"] == "allow"
 
-        # G. pre-tool-use: large file read (>300 lines) gets advisory warning by default
+        # G. pre-tool-use: unbounded large file read (> 500 lines) hard-denied by default
         out_buf = io.StringIO()
         sys.stdout = out_buf
         sys.stdin = io.StringIO(
@@ -452,7 +471,7 @@ def test_antigravity_hooks_contract() -> None:
         )
         handle_pre_tool_use()
         res_large = json.loads(out_buf.getvalue().strip())
-        assert res_large["decision"] == "allow"
+        assert res_large["decision"] == "deny"
         assert "[Phonix Advisory]" in res_large["reason"]
 
     finally:

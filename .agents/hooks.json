@@ -8,9 +8,16 @@
         "timeout": 10
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "python -m src.agy_hooks user-prompt-submit",
+        "timeout": 5
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "read_file|view_file|read_file_lines|run_command",
+        "matcher": "read_file|view_file|read_file_lines|run_command|manage_task|ManageTask|Bash|bash|execute_command",
         "hooks": [
           {
             "type": "command",

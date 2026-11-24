@@ -195,22 +195,15 @@ class ChatCompletionResponse(BaseModel):
 
 # --- PhonixHP Auto-Inject Rule Content & Engine ---
 
-PHONIX_HP_RULE_CONTENT: str = """# Phonix Context MMU & Quota Optimization Guidelines
+PHONIX_HP_RULE_CONTENT: str = """# Phonix Context MMU (PhonixHP)
 
-When `phonix-mmu` MCP tools are available in your environment, follow these guidelines to optimize context window and quota usage:
-
-## 1. When to Use Phonix Tools
-- **Files > 300 lines**: Prefer `phonix_get_pruned_context` over full-file reads to retrieve only relevant AST frames or verbatim line windows.
-- **Multi-File Lookups**: Batch multiple files, symbols, or search patterns into a single call using pipe syntax: `phonix_get_pruned_context(query="file1.py | file2.ts | targetSymbol")`.
-- **Workspace Navigation**: Use `phonix_repo_map(path_prefix="...")` for zero-token-overhead symbol maps.
-- **Multi-Hunk or CRLF Edits**: Prefer `phonix_surgical_edit(file_path="...", edits=[...])` for atomic multi-replacement edits with automatic line-ending normalization.
-
-## 2. Standard Tools
-- Normal `read_file` is allowed, especially with `StartLine`/`EndLine` ranges or for smaller files (< 300 lines).
-- Standard file-editing tools (`edit_file`) are fully supported.
-
-## 3. Fallback
-- If `phonix-mmu` MCP tools are not present or configured in your environment, ignore these guidelines and proceed with standard tools."""
+When `phonix-mmu` MCP tools are available:
+- `read_file` is fine for files <= 300 lines or bounded `StartLine`/`EndLine` slices.
+- `phonix_get_pruned_context(query="a | b | c")`: prefer for files > 300 lines or batching multiple targets.
+- `phonix_surgical_edit(file_path, edits)`: prefer for multi-hunk or Windows CRLF edits.
+- `phonix_symbol_impact(symbol)`: run before refactoring shared symbols (callers/callees in 1 turn).
+- `phonix_run_compact(command)`: prefer for noisy test/build/lint/diff runs (`pytest`, `tsc`, `npm run build`, `git diff`).
+"""
 
 
 def _ensure_phonix_hp_rule(workspace_root: str | Path) -> bool:
@@ -319,9 +312,12 @@ def _ensure_target_mcp_config(workspace_root: str | Path) -> bool:
         if "mcpServers" not in local_config or not isinstance(local_config["mcpServers"], dict):
             local_config["mcpServers"] = {}
 
+        import shutil
+
+        py_cmd = sys.executable if (sys.executable and Path(sys.executable).is_file()) else (shutil.which("python") or "python")
         repo_root_str = str(PHONIX_REPO_ROOT.resolve())
         local_config["mcpServers"]["phonix-mmu"] = {
-            "command": sys.executable,
+            "command": py_cmd,
             "args": ["-m", "src.mcp_server"],
             "cwd": repo_root_str,
             "env": {
@@ -410,7 +406,9 @@ class GatewayCore:
     TARGET_EXTENSIONS: set[str] = {
         ".py",
         ".ts",
+        ".tsx",
         ".js",
+        ".jsx",
         ".go",
         ".rs",
         ".java",
@@ -457,9 +455,12 @@ class GatewayCore:
         self.kv_prefix_cache: KVPrefixCache = KVPrefixCache(max_token_budget=kv_budget)
         self.frame_evictor: FrameEvictor = FrameEvictor()
 
-        # Fast lookup indexes for sliced AST frames
+        # Fast lookup indexes for sliced AST frames and incremental mtime cache
         self._frame_registry: dict[str, ASTFrame] = {}
         self._file_to_frames: dict[str, list[ASTFrame]] = {}
+        self._file_cache: dict[str, dict[str, Any]] = {}
+        self._dir_mtimes: dict[str, int] = {}
+        self._candidate_scan_done: bool = False
 
         self.speculative_inspector: SpeculativeInspector = SpeculativeInspector(
             file_trie=self.file_trie,
@@ -503,53 +504,39 @@ class GatewayCore:
             dirnames[:] = [
                 d for d in dirnames if d not in self.IGNORED_DIRS and not d.startswith(".")
             ]
+            try:
+                self._dir_mtimes[dirpath] = os.stat(dirpath).st_mtime_ns
+            except OSError:
+                pass
 
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in self.TARGET_EXTENSIONS:
+                    if ext in (".json", ".html", ".css", ".md"):
+                        full_extra = os.path.join(dirpath, filename)
+                        try:
+                            if os.path.getsize(full_extra) <= 512 * 1024:
+                                self._index_single_file(full_extra, update_trie=False)
+                        except OSError:
+                            pass
                     continue
 
                 full_path = os.path.join(dirpath, filename)
-                rel_path = os.path.relpath(full_path, root_dir)
-                norm_rel_path = self.file_trie.normalize_path(rel_path)
-
-                # Slice file into AST frames (< 512 tokens/frame)
-                frames = self.ast_slicer.slice_file(full_path)
-
-                # Normalize file_path and frame_id to clean relative path
-                normalized_frames: list[ASTFrame] = []
-                top_symbols: list[str] = []
-                for f in frames:
-                    norm_id = self.ast_slicer.generate_frame_id(
-                        norm_rel_path, f.symbol_name, f.raw_code
-                    )
-                    f.file_path = norm_rel_path
-                    f.frame_id = norm_id
-                    normalized_frames.append(f)
-                    self._frame_registry[norm_id] = f
-                    top_symbols.append(f.symbol_name)
-
-                self._file_to_frames[norm_rel_path] = normalized_frames
-                self.call_graph_pager.register_frames(normalized_frames)
-
-                try:
-                    size_bytes = os.path.getsize(full_path)
-                except OSError:
-                    size_bytes = 0
-
-                metadata = FileMetadata(
-                    file_path=norm_rel_path,
-                    size_bytes=size_bytes,
-                    ast_frame_ids=[f.frame_id for f in normalized_frames],
-                )
-                self.file_trie.insert(norm_rel_path, metadata)
+                entry = self._index_single_file(full_path, update_trie=True)
+                if entry is None:
+                    continue
                 indexed_count += 1
 
+                norm_rel_path = entry["rel_path"]
+                normalized_frames = self._file_to_frames.get(norm_rel_path, [])
+                top_symbols = [f.symbol_name for f in normalized_frames]
                 if top_symbols:
                     unique_syms = sorted(set(top_symbols))[:8]
                     repo_symbol_entries.append(f"{norm_rel_path}: {', '.join(unique_syms)}")
                 else:
                     repo_symbol_entries.append(norm_rel_path)
+
+        self._candidate_scan_done = True
 
         # Pin compact repository symbol map in KVPrefixCache for zero-overhead system prompts
         repo_map_text = "\n".join(repo_symbol_entries)
@@ -562,6 +549,160 @@ class GatewayCore:
             root_dir,
         )
         return indexed_count
+
+    def _index_single_file(
+        self,
+        full_path: str | Path,
+        st: os.stat_result | None = None,
+        update_trie: bool = False,
+    ) -> dict[str, Any] | None:
+        """Reads, caches (with mtime_ns + size), and optionally AST-slices a single file."""
+        abs_path = os.path.abspath(str(full_path))
+        try:
+            if st is None:
+                st = os.stat(abs_path)
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError:
+            return None
+
+        rel_path = os.path.relpath(abs_path, self.workspace_root)
+        norm_rel_path = self.file_trie.normalize_path(rel_path)
+        entry: dict[str, Any] = {
+            "abs_path": abs_path,
+            "rel_path": norm_rel_path,
+            "mtime_ns": st.st_mtime_ns,
+            "size": st.st_size,
+            "content": content,
+            "lines": content.splitlines(),
+        }
+        self._file_cache[norm_rel_path] = entry
+
+        ext = os.path.splitext(abs_path)[1].lower()
+        if ext in self.TARGET_EXTENSIONS:
+            # Remove stale frame IDs for this file before re-registering
+            old_frames = self._file_to_frames.get(norm_rel_path, [])
+            for old_f in old_frames:
+                self._frame_registry.pop(old_f.frame_id, None)
+
+            frames = self.ast_slicer.slice_code(content, file_path=norm_rel_path)
+            normalized_frames: list[ASTFrame] = []
+            for f in frames:
+                norm_id = self.ast_slicer.generate_frame_id(
+                    norm_rel_path, f.symbol_name, f.raw_code
+                )
+                f.file_path = norm_rel_path
+                f.frame_id = norm_id
+                normalized_frames.append(f)
+                self._frame_registry[norm_id] = f
+
+            self._file_to_frames[norm_rel_path] = normalized_frames
+            self.call_graph_pager.register_frames(normalized_frames)
+
+            if update_trie:
+                metadata = FileMetadata(
+                    file_path=norm_rel_path,
+                    size_bytes=st.st_size,
+                    ast_frame_ids=[f.frame_id for f in normalized_frames],
+                )
+                self.file_trie.insert(norm_rel_path, metadata)
+
+        return entry
+
+    def get_cached_file(self, file_path: str | Path) -> dict[str, Any] | None:
+        """Returns up-to-date cached file entry, checking os.stat mtime_ns and size."""
+        p = Path(file_path)
+        if not p.is_absolute():
+            p = Path(self.workspace_root) / p
+        abs_path = os.path.abspath(str(p))
+        rel_path = os.path.relpath(abs_path, self.workspace_root)
+        norm_rel_path = self.file_trie.normalize_path(rel_path)
+
+        try:
+            st = os.stat(abs_path)
+        except OSError:
+            self._file_cache.pop(norm_rel_path, None)
+            return None
+
+        cached = self._file_cache.get(norm_rel_path)
+        if (
+            cached is not None
+            and cached["mtime_ns"] == st.st_mtime_ns
+            and cached["size"] == st.st_size
+        ):
+            return cached
+
+        return self._index_single_file(abs_path, st=st, update_trie=True)
+
+    def refresh_file_index(
+        self,
+        extensions: tuple[str, ...] = (".ts", ".tsx", ".js", ".jsx", ".json", ".py", ".html", ".css", ".md"),
+        scan_subdirs: tuple[str, ...] = ("src", "app", "lib"),
+        extra_excluded_dirs: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Incrementally refreshes candidate files using directory and file mtime_ns checks."""
+        ws_path = Path(self.workspace_root).resolve()
+        scan_dirs = [ws_path / d for d in scan_subdirs if (ws_path / d).is_dir()]
+        if not scan_dirs:
+            scan_dirs = [ws_path]
+
+        excluded = set(self.IGNORED_DIRS)
+        if extra_excluded_dirs:
+            excluded.update(extra_excluded_dirs)
+
+        dirs_changed = not self._candidate_scan_done
+        if not dirs_changed:
+            for dpath, prev_mtime in list(self._dir_mtimes.items()):
+                try:
+                    if os.stat(dpath).st_mtime_ns != prev_mtime:
+                        dirs_changed = True
+                        break
+                except OSError:
+                    dirs_changed = True
+                    break
+            if not dirs_changed:
+                for sdir in scan_dirs:
+                    if str(sdir) not in self._dir_mtimes:
+                        dirs_changed = True
+                        break
+
+        if dirs_changed:
+            for sdir in scan_dirs:
+                for dirpath, dirnames, filenames in os.walk(sdir):
+                    dirnames[:] = [
+                        d for d in dirnames
+                        if d not in excluded and not d.startswith(".")
+                    ]
+                    try:
+                        self._dir_mtimes[dirpath] = os.stat(dirpath).st_mtime_ns
+                    except OSError:
+                        pass
+                    for fname in filenames:
+                        if fname.endswith(extensions):
+                            self.get_cached_file(os.path.join(dirpath, fname))
+            self._candidate_scan_done = True
+        else:
+            # Fast path: only stat already-tracked files (catches edits without os.walk)
+            for rel_key in list(self._file_cache.keys()):
+                if rel_key.endswith(extensions):
+                    entry = self._file_cache.get(rel_key)
+                    if entry is not None:
+                        self.get_cached_file(entry["abs_path"])
+
+        scan_prefixes = [
+            self.file_trie.normalize_path(os.path.relpath(str(s), str(ws_path)))
+            for s in scan_dirs
+        ]
+        results: list[dict[str, Any]] = []
+        for entry in self._file_cache.values():
+            rel = entry["rel_path"]
+            if not rel.endswith(extensions):
+                continue
+            if scan_dirs == [ws_path] or any(
+                rel == p or rel.startswith(p + "/") for p in scan_prefixes if p != "."
+            ):
+                results.append(entry)
+        return results
 
     def _prepare_context_and_routing(
         self, request: ChatCompletionRequest
@@ -1259,6 +1400,7 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
         auth_ws = _authorize_workspace(app, ws_root)
         target_files = payload.get("target_files", [])
         for_edit = bool(payload.get("for_edit", True))
+        detail = payload.get("detail")
 
         text_output = mcp_daemon._tool_get_pruned_context(
             query=query,
@@ -1266,6 +1408,7 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
             workspace_root=str(auth_ws),
             target_files=target_files,
             for_edit=for_edit,
+            detail=detail,
         )
 
         tokens = len(text_output) // 4

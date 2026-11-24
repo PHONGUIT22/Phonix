@@ -40,6 +40,16 @@ logger = logging.getLogger("phonix.main")
 app = create_gateway_app(auto_index=False)
 
 
+def _detect_python_executable() -> str:
+    """Returns a valid active Python executable path, falling back to 'python'."""
+    import shutil
+
+    if sys.executable and Path(sys.executable).is_file():
+        return sys.executable
+    found = shutil.which("python") or shutil.which("python3")
+    return found or "python"
+
+
 def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT, install_hooks: bool = False) -> None:
     """Safe workspace MCP bootstrapper.
 
@@ -52,7 +62,7 @@ def auto_bootstrap_agy_environment(repo_root: str = _REPO_ROOT, install_hooks: b
         return
 
     root_path = Path(repo_root).resolve()
-    py_exec = sys.executable or "python"
+    py_exec = _detect_python_executable()
     agents_dir = root_path / ".agents"
     try:
         agents_dir.mkdir(parents=True, exist_ok=True)
@@ -173,7 +183,7 @@ def install_agy(repo_root: str = _REPO_ROOT) -> int:
             local_config["mcpServers"] = {}
 
         local_config["mcpServers"]["phonix-mmu"] = {
-            "command": sys.executable,
+            "command": _detect_python_executable(),
             "args": ["-m", "src.mcp_server"],
             "env": {"PYTHONPATH": repo_root},
         }
@@ -218,7 +228,16 @@ def install_agy(repo_root: str = _REPO_ROOT) -> int:
         }
     }
     try:
-        if not hooks_file.exists():
+        should_write_hooks = not hooks_file.exists()
+        if not should_write_hooks:
+            try:
+                existing_hooks = json.loads(hooks_file.read_text(encoding="utf-8"))
+                gate = existing_hooks.get("phonix-quota-and-security-gate", {})
+                if "UserPromptSubmit" not in gate:
+                    should_write_hooks = True
+            except Exception:
+                should_write_hooks = True
+        if should_write_hooks:
             with open(hooks_file, "w", encoding="utf-8") as f:
                 json.dump(hooks_content, f, indent=2)
         print(f" [PASS] Verified hooks configuration at {hooks_file}")
@@ -295,7 +314,7 @@ def export_configs_command(workspace: str = ".", out: str | None = None) -> int:
     """Generates 1-click MCP configs for Claude Desktop, Cursor, and Cline."""
     target_ws = str(Path(workspace).resolve())
     phonix_root = str(Path(_REPO_ROOT).resolve())
-    py_exec = sys.executable or "python"
+    py_exec = _detect_python_executable()
 
     if out:
         out_dir = Path(out).resolve()
@@ -446,8 +465,55 @@ def find_phonix_leftovers(home_dir: Path) -> dict[str, list[Any]]:
     return leftovers
 
 
-def doctor_command(fix: bool = False, home_dir: Path | None = None) -> int:
-    """Audits and optionally cleans Phonix leftovers under ~/.gemini."""
+def _check_mcp_python_binary(repo_root: Path | None = None) -> tuple[bool, str]:
+    """Verifies that configured .agents/mcp_config.json Python binary exists and can import src.mcp_server."""
+    import shutil
+    import subprocess
+
+    check_root = repo_root or Path(_REPO_ROOT)
+    mcp_path = check_root / ".agents" / "mcp_config.json"
+    if not mcp_path.is_file():
+        return True, f"No {mcp_path} found (skipped MCP binary check)."
+
+    try:
+        cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
+        server_cfg = cfg.get("mcpServers", {}).get("phonix-mmu", {})
+        cmd = str(server_cfg.get("command", "")).strip()
+        if not cmd:
+            return False, f"Missing 'command' for phonix-mmu in {mcp_path}."
+
+        resolved_cmd = cmd if Path(cmd).is_file() else shutil.which(cmd)
+        if not resolved_cmd:
+            return False, f"Configured MCP Python binary '{cmd}' does not exist or is not on PATH."
+
+        env = os.environ.copy()
+        cfg_env = server_cfg.get("env", {})
+        if isinstance(cfg_env, dict):
+            for k, v in cfg_env.items():
+                if k == "PYTHONPATH" and v == ".":
+                    env[k] = str(check_root)
+                else:
+                    env[k] = str(v)
+        env.setdefault("PYTHONPATH", str(check_root))
+
+        proc = subprocess.run(
+            [resolved_cmd, "-c", "import src.mcp_server"],
+            cwd=str(check_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            return False, f"MCP Python binary '{resolved_cmd}' failed importing src.mcp_server: {err}"
+        return True, f"MCP Python binary verified ({resolved_cmd} -> import src.mcp_server OK)."
+    except Exception as exc:
+        return False, f"Failed checking MCP config {mcp_path}: {exc}"
+
+
+def doctor_command(fix: bool = False, home_dir: Path | None = None, repo_root: Path | None = None) -> int:
+    """Audits MCP binary health and optionally cleans Phonix leftovers under ~/.gemini."""
     import shutil
 
     if home_dir is None:
@@ -455,11 +521,14 @@ def doctor_command(fix: bool = False, home_dir: Path | None = None) -> int:
 
     gemini_dir = home_dir / ".gemini"
     print("=" * 65)
-    print(" Phonix v2.0 Doctor - Machine Hygiene Auditor")
+    print(" Phonix v2.0 Doctor - Machine Hygiene & MCP Auditor")
     print("=" * 65)
     print(f" Target Home:   {home_dir}")
     print(f" Target Gemini: {gemini_dir}")
     print("-" * 65)
+
+    mcp_ok, mcp_msg = _check_mcp_python_binary(repo_root=repo_root)
+    print(f" [{'PASS' if mcp_ok else 'FAIL'}] {mcp_msg}")
 
     leftovers = find_phonix_leftovers(home_dir)
     total_count = sum(len(items) for items in leftovers.values())
@@ -467,7 +536,7 @@ def doctor_command(fix: bool = False, home_dir: Path | None = None) -> int:
     if total_count == 0:
         print(" [PASS] Clean machine: No Phonix leftovers found under ~/.gemini.")
         print("=" * 65)
-        return 0
+        return 0 if mcp_ok else 1
 
     print(f" [!] Found {total_count} Phonix leftover item(s) in ~/.gemini:")
     for category, items in leftovers.items():

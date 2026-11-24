@@ -43,18 +43,23 @@ MALICIOUS_COMMAND_PATTERNS = [
 def handle_session_start(workspace_root: str = ".") -> int:
     """Executes SessionStart lifecycle hook.
 
-    Reads JSON on stdin if available, indexes the workspace using GatewayCore,
-    and outputs the exact Antigravity injectSteps contract:
-    {
-      "injectSteps": [
-        {
-          "systemMessage": {
-            "systemMessage": "[Phonix v2.0 Context MMU Active] To save token quota, prefer MCP tool `phonix_get_pruned_context` over reading full files. Indexed Repository Symbol Map:\n<compact_repo_map>"
-          }
-        }
-      ]
-    }
+    By default (PHONIX_INJECT_MAP unset or "0"), resets the circuit breaker turn
+    counter and emits `{}` (zero injected tokens, zero startup indexing tax).
+
+    When PHONIX_INJECT_MAP=1, indexes the workspace using GatewayCore and outputs
+    the legacy Antigravity injectSteps contract with the Repository Symbol Map.
     """
+    try:
+        reset_circuit_breaker_turn_count()
+    except Exception:
+        pass
+
+    inject_map = os.environ.get("PHONIX_INJECT_MAP") == "1"
+    if not inject_map:
+        sys.stdout.write(json.dumps({}) + "\n")
+        sys.stdout.flush()
+        return 0
+
     try:
         from src.gateway.proxy_server import GatewayCore
 
@@ -71,11 +76,6 @@ def handle_session_start(workspace_root: str = ".") -> int:
             f"{map_text}"
         )
 
-        try:
-            reset_circuit_breaker_turn_count()
-        except Exception:
-            pass
-
         output = {
             "injectSteps": [
                 {
@@ -89,10 +89,6 @@ def handle_session_start(workspace_root: str = ".") -> int:
         sys.stdout.flush()
         return 0
     except Exception as exc:
-        try:
-            reset_circuit_breaker_turn_count()
-        except Exception:
-            pass
         fallback_output = {
             "injectSteps": [
                 {
@@ -211,10 +207,10 @@ def handle_pre_tool_use() -> int:
         "reason": "..."
     }
     """
-    hard_deny_mode = os.environ.get("PHONIX_HARD_DENY") == "1"
+    soft_mode = os.environ.get("PHONIX_SOFT_MODE") == "1"
 
     def respond(decision: str, reason: str, tool_name: str = "", args: dict[str, Any] | None = None) -> int:
-        if decision == "deny" and not hard_deny_mode:
+        if decision == "deny" and soft_mode:
             decision = "allow"
         response = {
             "decision": decision,
@@ -310,7 +306,7 @@ def handle_pre_tool_use() -> int:
             clean_p = clean_p[7:]
         p = Path(clean_p)
 
-        # Check line ranges
+        # Check line ranges (Smart Large-File Guard)
         start_line = args.get("StartLine") if args.get("StartLine") is not None else args.get("start_line", args.get("startLine"))
         end_line = args.get("EndLine") if args.get("EndLine") is not None else args.get("end_line", args.get("endLine"))
 
@@ -319,31 +315,32 @@ def handle_pre_tool_use() -> int:
                 s = int(start_line)
                 e = int(end_line)
                 span = abs(e - s)
-                if span > 300:
+                if span > 400:
                     reason = (
-                        f"[Phonix Advisory] Bounded read range ({span} lines) of '{target_path}' exceeds 300 lines. "
-                        "Consider using 'phonix_get_pruned_context' for token efficiency."
+                        f"[Phonix Advisory] Bounded read range ({span} lines) of '{target_path}' exceeds 400 lines. "
+                        "Use 'phonix_get_pruned_context' or smaller StartLine/EndLine slices (<= 400 lines)."
                     )
                     return respond("deny", reason, tool_name, args)
             except (ValueError, TypeError):
                 pass
         else:
-            # Full file read without line range
+            # Unbounded full-file read without StartLine/EndLine
+            large_file_limit = int(os.environ.get("PHONIX_LARGE_FILE_LINES", "500"))
             if p.is_file():
                 try:
                     with open(p, "r", encoding="utf-8", errors="ignore") as f:
                         line_count = sum(1 for _ in f)
                 except Exception:
                     line_count = 0
-                if line_count > 300:
+                if line_count > large_file_limit:
                     reason = (
-                        f"[Phonix Advisory] File '{target_path}' is large ({line_count} lines > 300 lines). "
-                        "Consider using 'phonix_get_pruned_context' for token efficiency."
+                        f"[Phonix Advisory] Unbounded read of large file '{target_path}' ({line_count} lines > {large_file_limit} lines). "
+                        "Use 'phonix_get_pruned_context' or bounded StartLine/EndLine slices."
                     )
                     return respond("deny", reason, tool_name, args)
 
     # Rule: Guard dangerous exfiltration and destructive commands against run_command
-    if tool_name in ("run_command", "bash", "execute_command"):
+    if tool_name in ("run_command", "Bash", "bash", "execute_command"):
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd") or ""
         for pat in MALICIOUS_COMMAND_PATTERNS:
             if re.search(pat, cmd):

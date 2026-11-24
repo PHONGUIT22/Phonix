@@ -246,41 +246,46 @@ def test_mcp_server_protocol_and_tools() -> None:
 
 
 def test_agy_lifecycle_hooks() -> None:
-    """Verifies that agy_hooks enforces Zero-Trust guardrails on tool calls."""
+    """Verifies that agy_hooks enforces tiered Zero-Trust guardrails on tool calls."""
     import io
 
     from src.agy_hooks import handle_pre_tool_use, handle_session_start
 
-    # Test SessionStart hook
-    ret = handle_session_start(workspace_root=".")
-    assert ret == 0
-
-    # Test PreToolUse: block sensitive file (.env)
     old_stdin = sys.stdin
     old_stdout = sys.stdout
     try:
-        # By default (soft advisory mode), accessing .env returns allow with advisory reason
+        # Test SessionStart hook (zero-tax default {})
+        os.environ.pop("PHONIX_INJECT_MAP", None)
+        out_ss = io.StringIO()
+        sys.stdout = out_ss
+        ret = handle_session_start(workspace_root=".")
+        assert ret == 0
+        assert json.loads(out_ss.getvalue().strip()) == {}
+
+        # Test PreToolUse: hard-denies sensitive file (.env) by default
+        os.environ.pop("PHONIX_SOFT_MODE", None)
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": ".env"}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_env = json.loads(out_buf.getvalue())
-        assert res_env["decision"] == "allow"
+        assert res_env["decision"] == "deny"
         assert "Zero-Trust" in res_env["reason"]
 
-        # With PHONIX_HARD_DENY=1, it denies
-        os.environ["PHONIX_HARD_DENY"] = "1"
+        # With PHONIX_SOFT_MODE=1, it softens deny to allow with advisory reason
+        os.environ["PHONIX_SOFT_MODE"] = "1"
         try:
             sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": ".env"}}}))
             out_buf = io.StringIO()
             sys.stdout = out_buf
             handle_pre_tool_use()
-            res_env_deny = json.loads(out_buf.getvalue())
-            assert res_env_deny["decision"] == "deny"
+            res_env_soft = json.loads(out_buf.getvalue())
+            assert res_env_soft["decision"] == "allow"
+            assert "Zero-Trust" in res_env_soft["reason"]
         finally:
-            os.environ.pop("PHONIX_HARD_DENY", None)
+            os.environ.pop("PHONIX_SOFT_MODE", None)
 
-        # Malicious exfiltration command: advisory warning by default, deny with HARD_DENY=1
+        # Malicious exfiltration command: hard-denied by default
         sys.stdin = io.StringIO(
             json.dumps(
                 {
@@ -295,27 +300,27 @@ def test_agy_lifecycle_hooks() -> None:
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_cmd = json.loads(out_buf.getvalue())
-        assert res_cmd["decision"] == "allow"
+        assert res_cmd["decision"] == "deny"
         assert "Zero-Trust" in res_cmd["reason"]
 
-        # Normal bounded read_file on source code (<= 300 lines) is allowed
-        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 50}}}))
+        # Bounded read_file on source code (<= 400 lines) is allowed
+        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/main.py", "StartLine": 1, "EndLine": 350}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_code_bounded = json.loads(out_buf.getvalue())
         assert res_code_bounded["decision"] == "allow"
 
-        # Large file read (>300 lines) gets advisory warning by default
+        # Unbounded large file read (> 500 lines) is hard-denied by default
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "src/gateway/proxy_server.py"}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
         handle_pre_tool_use()
         res_code_unbounded = json.loads(out_buf.getvalue())
-        assert res_code_unbounded["decision"] == "allow"
+        assert res_code_unbounded["decision"] == "deny"
         assert "Phonix Advisory" in res_code_unbounded["reason"]
 
-        # Allow bounded read_file on non-code files (e.g. pyproject.toml <= 300 lines)
+        # Allow bounded read_file on non-code files (e.g. pyproject.toml <= 400 lines)
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "pyproject.toml", "StartLine": 1, "EndLine": 50}}}))
         out_buf = io.StringIO()
         sys.stdout = out_buf
@@ -429,7 +434,7 @@ def test_http_mmu_and_z3_endpoints() -> None:
     assert "Phonix Context MMU" in repo_map_res["result"]
 
     # 3. Invoke /v1/mmu/prune
-    prune_res = run_coro(routes["/v1/mmu/prune"]({"query": "rehydrator"}))
+    prune_res = run_coro(routes["/v1/mmu/prune"]({"query": "rehydrator", "for_edit": False}))
     assert "result" in prune_res
     assert "AST Frame" in prune_res["result"] or "Phonix Context MMU" in prune_res["result"]
 
@@ -467,14 +472,23 @@ def test_v21_multi_query_and_surgical_edit(tmp_path: Path) -> None:
 
     server = PhonixMCPServer(workspace_root=str(_REPO_ROOT))
 
-    # 1. Multi-query batching with for_edit=True
+    # 1. Multi-query batching with for_edit=True (minimal detail by default)
     pruned_res = server._tool_get_pruned_context(
         query="src/main.py | auto_bootstrap_agy_environment",
         for_edit=True,
     )
-    assert "=== Verbatim Edit Window:" in pruned_res
+    assert "--- src/main.py [Lines " in pruned_res
     assert "[Lines " in pruned_res
     assert "auto_bootstrap_agy_environment" in pruned_res
+
+    # Explicit detail="full" includes G-MMU L0-L3 headers once per file
+    pruned_full = server._tool_get_pruned_context(
+        query="src/main.py | auto_bootstrap_agy_environment",
+        for_edit=True,
+        detail="full",
+    )
+    assert "=== Verbatim Edit Window:" in pruned_full
+    assert pruned_full.count("=== [G-MMU L0:") == 1
 
     # 2. CRLF-safe surgical edit test
     test_file = tmp_path / "sample.ts"
@@ -701,10 +715,21 @@ def test_colon_line_range_syntax_and_gmmu(tmp_path: Path) -> None:
 
     server = PhonixMCPServer(workspace_root=str(tmp_path))
 
-    # 1. Query with colon syntax: module_alpha.py:10-16
+    # 1. Query with colon syntax: module_alpha.py:10-16 (defaults to minimal detail)
+    res_min = server._tool_get_pruned_context(
+        query="module_alpha.py:10-16",
+        for_edit=True,
+        workspace_root=str(tmp_path),
+    )
+    assert "--- module_alpha.py [Lines 10-16 / Total 19] ---" in res_min
+    assert "def target_function():" in res_min
+    assert "=== [G-MMU L0:" not in res_min
+
+    # 2. Query with detail="full" verifies all G-MMU L0-L3 layers are present
     res = server._tool_get_pruned_context(
         query="module_alpha.py:10-16",
         for_edit=True,
+        detail="full",
         workspace_root=str(tmp_path),
     )
 
@@ -723,17 +748,18 @@ def test_colon_line_range_syntax_and_gmmu(tmp_path: Path) -> None:
     assert "=== Verbatim Edit Window: module_alpha.py [Lines 10-16] ===" in res
     assert "def target_function():" in res
 
-    # 2. Apply surgical edit and verify G-MMU L3 -> L1 attention decay banner
+    # 3. Apply surgical edit and verify G-MMU L3 -> L1 attention decay banner
     server._tool_surgical_edit(
         file_path=str(test_file),
         edits=[{"target": "val * 2", "replacement": "val * 3"}],
         workspace_root=str(tmp_path),
     )
 
-    # Re-query the edited file - should now show committed banner in L0
+    # Re-query the edited file with detail="full" - should now show committed banner in L0
     res_after = server._tool_get_pruned_context(
         query="module_alpha.py:10-16",
         for_edit=True,
+        detail="full",
         workspace_root=str(tmp_path),
     )
     assert "[G-MMU L3 -> L1: Committed & Verified]" in res_after
@@ -766,39 +792,39 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     r1 = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
     assert r1["decision"] == "allow"
 
-    # 2. Consecutive ManageTask polling call: warns only by default (PHONIX_HARD_DENY unset)
-    r2 = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
-    assert r2["decision"] == "allow"
-    assert "Anti-Polling" in r2["reason"]
-
-    # When PHONIX_HARD_DENY=1, consecutive ManageTask is denied
-    monkeypatch.setenv("PHONIX_HARD_DENY", "1")
+    # 2. Consecutive ManageTask polling call: hard-denied by default
     r2_deny = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
     assert r2_deny["decision"] == "deny"
     assert "Anti-Polling" in r2_deny["reason"]
-    monkeypatch.delenv("PHONIX_HARD_DENY", raising=False)
 
-    # Also verify manage_task lowercase alias with action='list'
+    # With PHONIX_SOFT_MODE=1, consecutive ManageTask softens to allow with warning
+    monkeypatch.setenv("PHONIX_SOFT_MODE", "1")
+    r2_soft = invoke("ManageTask", {"Action": "status", "TaskId": "task-abc"})
+    assert r2_soft["decision"] == "allow"
+    assert "Anti-Polling" in r2_soft["reason"]
+    monkeypatch.delenv("PHONIX_SOFT_MODE", raising=False)
+
+    # Also verify manage_task lowercase alias with action='list' hard-denies on repeat
     r_other = invoke("other_tool", {"dummy": 1})
     assert r_other["decision"] == "allow"
     r_list1 = invoke("manage_task", {"Action": "list"})
     assert r_list1["decision"] == "allow"
     r_list2 = invoke("manage_task", {"Action": "list"})
-    assert r_list2["decision"] == "allow"
+    assert r_list2["decision"] == "deny"
     assert "Anti-Polling" in r_list2["reason"]
 
-    # 3. Shell sleep loop: warns by default, denies with PHONIX_HARD_DENY=1
+    # 3. Shell sleep loop: hard-denied by default, soft warning with PHONIX_SOFT_MODE=1
     r_sleep1 = invoke("run_command", {"CommandLine": "Start-Sleep -Seconds 5"})
-    assert r_sleep1["decision"] == "allow"
+    assert r_sleep1["decision"] == "deny"
     assert "sleep" in r_sleep1["reason"].lower()
 
-    monkeypatch.setenv("PHONIX_HARD_DENY", "1")
+    monkeypatch.setenv("PHONIX_SOFT_MODE", "1")
     r_sleep2 = invoke("Bash", {"command": "while true; do sleep 2; done"})
-    assert r_sleep2["decision"] == "deny"
+    assert r_sleep2["decision"] == "allow"
     assert "sleep" in r_sleep2["reason"].lower()
-    monkeypatch.delenv("PHONIX_HARD_DENY", raising=False)
+    monkeypatch.delenv("PHONIX_SOFT_MODE", raising=False)
 
-    # 4. Turn Budget Circuit Breaker: warn at 25, hard-deny at 40 (only if HARD_DENY=1)
+    # 4. Turn Budget Circuit Breaker: warn at 25, hard-deny at 40 by default
     # Write a state with turn_count = 24
     with open(circuit_file, "r", encoding="utf-8") as f:
         c_state = json.load(f)
@@ -821,16 +847,16 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     with open(circuit_file, "w", encoding="utf-8") as f:
         json.dump(c_state, f)
 
-    # Next tool call increments turn_count to 40 (warning by default, deny if HARD_DENY=1)
-    r_turn40 = invoke("unrelated_tool", {"action": "compute"})
-    assert r_turn40["decision"] == "allow"
-    assert "Turn Budget" in r_turn40["reason"]
-
-    monkeypatch.setenv("PHONIX_HARD_DENY", "1")
+    # Next tool call increments turn_count to 40 (hard-denied by default)
     r_turn40_deny = invoke("unrelated_tool", {"action": "compute"})
     assert r_turn40_deny["decision"] == "deny"
     assert "Turn Budget" in r_turn40_deny["reason"]
-    monkeypatch.delenv("PHONIX_HARD_DENY", raising=False)
+
+    monkeypatch.setenv("PHONIX_SOFT_MODE", "1")
+    r_turn40_soft = invoke("unrelated_tool", {"action": "compute"})
+    assert r_turn40_soft["decision"] == "allow"
+    assert "Turn Budget" in r_turn40_soft["reason"]
+    monkeypatch.delenv("PHONIX_SOFT_MODE", raising=False)
 
     # 5. UserPromptSubmit resets turn_count
     from src.agy_hooks import handle_user_prompt_submit
@@ -886,13 +912,7 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     with open(circuit_file, "w", encoding="utf-8") as f:
         json.dump(c_state, f)
 
-    # Warns by default at turn 8
-    r_cfg_warn8 = invoke("unrelated_tool", {"action": "compute"})
-    assert r_cfg_warn8["decision"] == "allow"
-    assert "Turn Budget" in r_cfg_warn8["reason"]
-
-    # Denies when PHONIX_HARD_DENY=1
-    monkeypatch.setenv("PHONIX_HARD_DENY", "1")
+    # Hard-denies by default at turn 8
     with open(circuit_file, "r", encoding="utf-8") as f:
         c_state = json.load(f)
     c_state["turn_count"] = 7
@@ -903,6 +923,19 @@ def test_circuit_breaker_anti_polling_and_turn_budget(tmp_path: Path, monkeypatc
     r_cfg_deny = invoke("unrelated_tool", {"action": "compute"})
     assert r_cfg_deny["decision"] == "deny"
     assert "Turn Budget" in r_cfg_deny["reason"]
+
+    # Softens when PHONIX_SOFT_MODE=1
+    monkeypatch.setenv("PHONIX_SOFT_MODE", "1")
+    with open(circuit_file, "r", encoding="utf-8") as f:
+        c_state = json.load(f)
+    c_state["turn_count"] = 7
+    c_state["last_call_timestamp"] = time.time()
+    with open(circuit_file, "w", encoding="utf-8") as f:
+        json.dump(c_state, f)
+
+    r_cfg_soft = invoke("unrelated_tool", {"action": "compute"})
+    assert r_cfg_soft["decision"] == "allow"
+    assert "Turn Budget" in r_cfg_soft["reason"]
 
 
 def test_target_mcp_config_preserves_existing_servers(tmp_path: Path) -> None:

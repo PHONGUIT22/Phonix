@@ -1,13 +1,13 @@
 {
   "mcpServers": {
     "phonix-mmu": {
-      "command": "D:\\UIT\\python.exe",
+      "command": "python",
       "args": [
         "-m",
         "src.mcp_server"
       ],
       "env": {
-        "PYTHONPATH": "D:\\UIT\\NamBonUIT\\Phonix"
+        "PYTHONPATH": "."
       }
     }
   }

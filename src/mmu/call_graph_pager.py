@@ -8,7 +8,7 @@ Explicitly avoids heavy Z3 solver logic for code transpilation; purely static gr
 from __future__ import annotations
 
 from collections import deque
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from src.mmu.ast_slicer import ASTFrame
@@ -73,30 +73,48 @@ class CallGraphPager:
             self.register_frame(frame)
 
     def get_symbol_frames(self, symbol: str) -> list[ASTFrame]:
-        """Returns all AST frames defining a specific symbol (including partitioned parts)."""
+        """Returns all AST frames defining a specific symbol (including partitioned parts and class methods)."""
         if symbol in self._symbol_to_frames:
             return self._symbol_to_frames[symbol]
-        prefix = f"{symbol}#"
+        part_prefix = f"{symbol}#"
+        method_prefix = f"{symbol}."
         matched: list[ASTFrame] = []
         for sym, frames in self._symbol_to_frames.items():
-            if sym.startswith(prefix):
+            if sym.startswith(part_prefix) or sym.startswith(method_prefix):
                 matched.extend(frames)
         return matched
+
+    def get_callers(self, symbol: str) -> set[str]:
+        """Returns direct caller symbols for a given symbol (including Class.method forms)."""
+        callers: set[str] = set(self._adjacency_in.get(symbol, set()))
+        suffix = f".{symbol}"
+        for dep_sym, caller_set in self._adjacency_in.items():
+            if dep_sym.endswith(suffix) or dep_sym.startswith(f"{symbol}."):
+                callers.update(caller_set)
+        return callers
+
+    def get_callees(self, symbol: str) -> set[str]:
+        """Returns direct callee symbols for a given symbol."""
+        callees: set[str] = set(self._adjacency_out.get(symbol, set()))
+        for sym, deps in self._adjacency_out.items():
+            if sym.startswith(f"{symbol}.") or sym.startswith(f"{symbol}#"):
+                callees.update(deps)
+        return callees
 
     def page_graph(
         self,
         seed_symbols: list[str],
         max_hops: int | None = None,
         max_token_budget: int = 3072,
+        direction: Literal["callees", "callers", "both"] = "callees",
     ) -> list[ASTFrame]:
         """Expands context deterministically up to max_hops (1-hop / 2-hop).
 
-        Performs Breadth-First Search (BFS) starting from seed_symbols.
+        Performs Breadth-First Search (BFS) starting from seed_symbols along:
+        - direction="callees": outgoing dependency edges (_adjacency_out)
+        - direction="callers": incoming caller edges (_adjacency_in)
+        - direction="both": bidirectional (callers + callees)
         Returns a curated list of AST frames whose cumulative token count <= max_token_budget.
-
-        TODO (Phonix v2.0):
-        - Incorporate symbol usage frequency weights to break ties during budget contention.
-        - Add reverse-call (callee -> caller) expansion for context-aware bug localization.
         """
         hops_limit = self.default_max_hops if max_hops is None else max_hops
         visited_symbols: set[str] = set()
@@ -114,7 +132,7 @@ class CallGraphPager:
             visited_symbols.add(symbol)
 
             # Retrieve frames associated with this symbol
-            frames = self._symbol_to_frames.get(symbol, [])
+            frames = self.get_symbol_frames(symbol)
             for frame in frames:
                 if frame.frame_id not in selected_frame_ids:
                     if current_tokens + frame.token_count <= max_token_budget:
@@ -127,7 +145,11 @@ class CallGraphPager:
 
             # If within hop limit, discover neighbors (1-hop, 2-hop)
             if hop < hops_limit:
-                neighbors = self._adjacency_out.get(symbol, set())
+                neighbors: set[str] = set()
+                if direction in ("callees", "both"):
+                    neighbors.update(self._adjacency_out.get(symbol, set()))
+                if direction in ("callers", "both"):
+                    neighbors.update(self._adjacency_in.get(symbol, set()))
                 for neighbor in sorted(neighbors):
                     if neighbor not in visited_symbols:
                         queue.append((neighbor, hop + 1))
