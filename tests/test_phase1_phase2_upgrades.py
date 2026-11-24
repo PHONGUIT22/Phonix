@@ -439,3 +439,134 @@ def test_one_click_full_armor_deploys_and_cleans_all_three(tmp_path: Path) -> No
     assert not (target_ws / ".agents" / "mcp_config.json").exists()
     assert not hooks_file.exists()
 
+
+def test_repo_map_lazy_indexes_when_gateway_started_with_auto_index_false(tmp_path: Path) -> None:
+    """POST /v1/mmu/repo-map lazily indexes startup workspace even when auto_index=False."""
+    from fastapi.testclient import TestClient
+    from src.gateway.proxy_server import create_gateway_app
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "demo.py").write_text("def sample_fn():\n    return 1\n", encoding="utf-8")
+
+    app = create_gateway_app(workspace_root=str(tmp_path), auto_index=False)
+    client = TestClient(app)
+
+    resp = client.post("/v1/mmu/repo-map", json={"path_prefix": "", "workspace_root": str(tmp_path)})
+    assert resp.status_code == 200
+    text = resp.json()["result"]
+    assert "Indexed Files: 0" not in text
+    assert "sample_fn" in text
+
+
+def test_smart_gate_lightweight_bulk_read_and_mcp_exemption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Smart Gate allows 1-4 small reads, blocks 5th sequential read, and resets on phonix-mmu schema."""
+    monkeypatch.setenv("PHONIX_CIRCUIT_STATE_PATH", str(tmp_path / "circuit.json"))
+    monkeypatch.delenv("PHONIX_SOFT_MODE", raising=False)
+    monkeypatch.delenv("PHONIX_BULK_READ_LIMIT", raising=False)
+
+    small = tmp_path / "small.py"
+    small.write_text("x = 1\n", encoding="utf-8")
+
+    def invoke(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        old_in, old_out = sys.stdin, sys.stdout
+        try:
+            sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": name, "args": args}}))
+            out = io.StringIO()
+            sys.stdout = out
+            handle_pre_tool_use()
+            return json.loads(out.getvalue().strip())
+        finally:
+            sys.stdin, sys.stdout = old_in, old_out
+
+    # 1-4 small reads are allowed
+    for _ in range(4):
+        res = invoke("read_file", {"Path": str(small)})
+        assert res["decision"] == "allow"
+
+    # 5th sequential read triggers Bulk-Read Guard
+    res5 = invoke("read_file", {"Path": str(small)})
+    assert res5["decision"] == "deny"
+    assert "phonix_repo_map" in res5["reason"]
+    assert "phonix_get_pruned_context" in res5["reason"]
+
+    # Reading phonix-mmu MCP schema is ALWAYS allowed and resets read_count_in_prompt
+    res_mcp = invoke(
+        "read_file",
+        {"Path": "C:/Users/HP/.gemini/antigravity-cli/mcp/phonix-mmu/phonix_repo_map.json"},
+    )
+    assert res_mcp["decision"] == "allow"
+
+    # Normal small read is unblocked again after reset
+    res_after = invoke("read_file", {"Path": str(small)})
+    assert res_after["decision"] == "allow"
+
+
+def test_smart_gate_large_file_guidance_no_slice_loophole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unbounded >500-line read denies and points to phonix_get_pruned_context without slice-splitting hint."""
+    monkeypatch.setenv("PHONIX_CIRCUIT_STATE_PATH", str(tmp_path / "circuit.json"))
+    monkeypatch.delenv("PHONIX_SOFT_MODE", raising=False)
+
+    big = tmp_path / "big_module.py"
+    big.write_text("\n".join(f"line_{i} = {i}" for i in range(600)), encoding="utf-8")
+
+    old_in, old_out = sys.stdin, sys.stdout
+    try:
+        sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": str(big)}}}))
+        out = io.StringIO()
+        sys.stdout = out
+        handle_pre_tool_use()
+        res = json.loads(out.getvalue().strip())
+    finally:
+        sys.stdin, sys.stdout = old_in, old_out
+
+    assert res["decision"] == "deny"
+    assert "phonix_get_pruned_context" in res["reason"]
+    assert "StartLine/EndLine" not in res["reason"]
+
+
+def test_smart_gate_noisy_command_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Noisy test/build/lint commands route to phonix_run_compact; lightweight/piped commands stay allowed."""
+    monkeypatch.setenv("PHONIX_CIRCUIT_STATE_PATH", str(tmp_path / "circuit.json"))
+    monkeypatch.delenv("PHONIX_SOFT_MODE", raising=False)
+    monkeypatch.delenv("PHONIX_ALLOW_RAW_NOISY_CMD", raising=False)
+
+    def run_cmd(cmd: str) -> dict[str, Any]:
+        old_in, old_out = sys.stdin, sys.stdout
+        try:
+            sys.stdin = io.StringIO(
+                json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": cmd}}})
+            )
+            out = io.StringIO()
+            sys.stdout = out
+            handle_pre_tool_use()
+            return json.loads(out.getvalue().strip())
+        finally:
+            sys.stdin, sys.stdout = old_in, old_out
+
+    # Noisy commands blocked -> routed to phonix_run_compact
+    for noisy in ("npx tsc --noEmit", "pytest tests/ -v", "npm run build"):
+        r = run_cmd(noisy)
+        assert r["decision"] == "deny", f"Expected deny for {noisy}"
+        assert "phonix_run_compact" in r["reason"]
+
+    # Lightweight / piped / exempted commands allowed
+    for ok_cmd in (
+        "git status",
+        "python --version",
+        "pytest --version",
+        "npm run build | Select-Object -Last 20",
+    ):
+        r = run_cmd(ok_cmd)
+        assert r["decision"] == "allow", f"Expected allow for {ok_cmd}: {r}"
+
+    # Opt-out env var allows raw noisy command
+    monkeypatch.setenv("PHONIX_ALLOW_RAW_NOISY_CMD", "1")
+    assert run_cmd("pytest tests/ -v")["decision"] == "allow"
+
+

@@ -195,14 +195,14 @@ class ChatCompletionResponse(BaseModel):
 
 # --- PhonixHP Auto-Inject Rule Content & Engine ---
 
-PHONIX_HP_RULE_CONTENT: str = """# Phonix Context MMU (PhonixHP)
+PHONIX_HP_RULE_CONTENT: str = """# Phonix Smart Gate (PhonixHP)
 
-When `phonix-mmu` MCP tools are available:
-- `read_file` is fine for files <= 300 lines or bounded `StartLine`/`EndLine` slices.
-- `phonix_get_pruned_context(query="a | b | c")`: prefer for files > 300 lines or batching multiple targets.
-- `phonix_surgical_edit(file_path, edits)`: prefer for multi-hunk or Windows CRLF edits.
-- `phonix_symbol_impact(symbol)`: run before refactoring shared symbols (callers/callees in 1 turn).
-- `phonix_run_compact(command)`: prefer for noisy test/build/lint/diff runs (`pytest`, `tsc`, `npm run build`, `git diff`).
+- **Small/Quick** (1-4 files <= 400 lines, `git`, `npm install`): use native `read_file` / `edit_file` / `run_command`.
+- **Survey / Overview**: **MUST** call `phonix_repo_map` first (not bulk `read_file`).
+- **Large File (> 400 lines) / Multi-Target**: **MUST** batch in `phonix_get_pruned_context(query="a | b | c")`.
+- **Shared Symbol Refactor**: **MUST** call `phonix_symbol_impact(symbol)` first for callers/callees.
+- **Test / Build / Lint** (`pytest`, `tsc`, `npm run build`, `eslint`): **MUST** call `phonix_run_compact(command)`.
+- **Multi-Hunk / CRLF Edits**: use `phonix_surgical_edit(file_path, edits)`.
 """
 
 

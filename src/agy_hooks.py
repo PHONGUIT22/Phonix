@@ -144,6 +144,7 @@ def _load_circuit_state() -> dict[str, Any]:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
+                    data.setdefault("read_count_in_prompt", 0)
                     return data
         except Exception:
             pass
@@ -153,6 +154,7 @@ def _load_circuit_state() -> dict[str, Any]:
         "last_tool_name": "",
         "last_tool_args_hash": "",
         "consecutive_same_tool_count": 0,
+        "read_count_in_prompt": 0,
     }
 
 
@@ -167,14 +169,57 @@ def _save_circuit_state(state: dict[str, Any]) -> None:
 
 
 def reset_circuit_breaker_turn_count() -> None:
-    """Resets the stateful Circuit Breaker turn counter and polling state."""
+    """Resets the stateful Circuit Breaker turn counter, polling state, and bulk-read count."""
     state = _load_circuit_state()
     state["turn_count"] = 0
     state["consecutive_same_tool_count"] = 0
+    state["read_count_in_prompt"] = 0
     state["last_tool_name"] = ""
     state["last_tool_args_hash"] = ""
     state["last_call_timestamp"] = time.time()
     _save_circuit_state(state)
+
+
+_NOISY_COMMAND_RE = re.compile(
+    r"(?i)(?:^|[;&|]\s*|\bpython\s+-m\s+)(?:"
+    r"pytest|py\.test|unittest|npx\s+tsc|tsc(?:\s+--noEmit)?|"
+    r"(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:build|test|lint)|"
+    r"vitest|jest|eslint|mypy|ruff\s+check|cargo\s+test|go\s+test"
+    r")\b"
+)
+
+_COMPACT_PIPE_EXEMPTION_RE = re.compile(
+    r"(?i)(?:\|\s*(?:head|tail|Select-Object|Select-String|findstr|grep|rg)\b|--version\b|--help\b)"
+)
+
+
+def _is_mcp_or_metadata_path(norm_path: str) -> bool:
+    """Returns True for Antigravity MCP schema/instruction/agent metadata paths."""
+    lower = norm_path.lower()
+    return (
+        "mcp/phonix-mmu" in lower
+        or ".gemini/antigravity" in lower
+        or "/mcp/" in lower
+        or lower.startswith("mcp/")
+        or lower.endswith("/instructions.md")
+        or lower == "instructions.md"
+        or "/.agents/" in lower
+        or lower.startswith(".agents/")
+    )
+
+
+def _is_noisy_command(cmd: str) -> bool:
+    """Detects verbose test/build/lint commands that should be routed to phonix_run_compact."""
+    stripped = cmd.strip()
+    if not stripped:
+        return False
+    if _COMPACT_PIPE_EXEMPTION_RE.search(stripped):
+        return False
+    if re.match(r"(?i)^(?:git|pip|pip3|uv)\s+", stripped):
+        return False
+    if re.match(r"(?i)^python(?:3)?\s+-m\s+src\.(?:main|mcp_server|agy_hooks)\b", stripped):
+        return False
+    return bool(_NOISY_COMMAND_RE.search(stripped))
 
 
 def handle_user_prompt_submit() -> int:
@@ -241,6 +286,7 @@ def handle_pre_tool_use() -> int:
     last_call_ts = float(state.get("last_call_timestamp", 0.0))
     turn_count = int(state.get("turn_count", 0))
     consecutive_count = int(state.get("consecutive_same_tool_count", 0))
+    read_count_in_prompt = int(state.get("read_count_in_prompt", 0))
     last_tool = str(state.get("last_tool_name", ""))
 
     current_args_hash = hashlib.sha256(json.dumps(args, sort_keys=True).encode("utf-8")).hexdigest()[:16]
@@ -249,6 +295,7 @@ def handle_pre_tool_use() -> int:
     if (now - last_call_ts) > idle_timeout:
         turn_count = 1
         consecutive_count = 1
+        read_count_in_prompt = 0
     else:
         turn_count += 1
         if tool_name == last_tool:
@@ -262,6 +309,7 @@ def handle_pre_tool_use() -> int:
         "last_tool_name": tool_name,
         "last_tool_args_hash": current_args_hash,
         "consecutive_same_tool_count": consecutive_count,
+        "read_count_in_prompt": read_count_in_prompt,
     }
     _save_circuit_state(updated_state)
 
@@ -272,11 +320,23 @@ def handle_pre_tool_use() -> int:
         reason = "[Phonix Circuit Breaker] Anti-Polling Lock Tripped! Consecutive ManageTask polling detected."
         return respond("deny", reason, tool_name, args)
 
-    # Circuit Breaker 2: Sleep loops
+    # Circuit Breaker 2 & Zero-Trust Gate: run_command security & noisy-command routing
     if tool_name in ("run_command", "Bash", "bash", "execute_command"):
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd") or ""
+        for pat in MALICIOUS_COMMAND_PATTERNS:
+            if re.search(pat, cmd):
+                reason = "[Phonix Zero-Trust Gate] Command warning: detected potential secret exposure or unsafe pattern."
+                return respond("deny", reason, tool_name, args)
         if re.search(r"(?i)(?:Start-Sleep|while\s+true|sleep\s+\d+)", cmd):
             reason = "[Phonix Circuit Breaker] Shell sleep loops are discouraged to prevent task timeout."
+            return respond("deny", reason, tool_name, args)
+        if os.environ.get("PHONIX_ALLOW_RAW_NOISY_CMD") != "1" and _is_noisy_command(cmd):
+            cmd_preview = cmd.strip().replace("\n", " ")[:60]
+            reason = (
+                f"[Phonix Smart Gate] Noisy test/build/lint command detected ('{cmd_preview}'). "
+                "Call MCP tool 'phonix_run_compact(command=...)' instead to compress verbose logs by 70-95% "
+                "while saving the full log to .phonix_runtime/last_cmd_output.log."
+            )
             return respond("deny", reason, tool_name, args)
 
     # Circuit Breaker 3: Turn Budget
@@ -299,6 +359,29 @@ def handle_pre_tool_use() -> int:
                 reason = "[Phonix Zero-Trust Gate] Direct access to sensitive credential file is restricted by policy."
                 return respond("deny", reason, tool_name, args)
 
+        # Exempt MCP schema/metadata reads; reset bulk-read counter when loading phonix-mmu schemas
+        if "phonix-mmu" in norm_path.lower():
+            updated_state["read_count_in_prompt"] = 0
+            _save_circuit_state(updated_state)
+            return respond("allow", "Phonix MCP schema read allowed; bulk-read counter reset.", tool_name, args)
+
+        if _is_mcp_or_metadata_path(norm_path):
+            return respond("allow", "MCP/agent metadata read allowed.", tool_name, args)
+
+        # Bulk-Read Guard
+        read_count_in_prompt += 1
+        updated_state["read_count_in_prompt"] = read_count_in_prompt
+        _save_circuit_state(updated_state)
+
+        bulk_read_limit = int(os.environ.get("PHONIX_BULK_READ_LIMIT", "5"))
+        if read_count_in_prompt >= bulk_read_limit:
+            reason = (
+                f"[Phonix Smart Gate] Bulk-read threshold reached ({read_count_in_prompt} sequential read_file calls in this prompt). "
+                "Stop reading files one-by-one: call MCP tool 'phonix_repo_map' for codebase overview or batch multiple targets "
+                "in 1 call via 'phonix_get_pruned_context(query=\"file1 | file2 | symbol\")'."
+            )
+            return respond("deny", reason, tool_name, args)
+
         clean_p = target_path.strip().strip("'\"")
         if clean_p.startswith("file:///"):
             clean_p = clean_p[8:]
@@ -317,8 +400,8 @@ def handle_pre_tool_use() -> int:
                 span = abs(e - s)
                 if span > 400:
                     reason = (
-                        f"[Phonix Advisory] Bounded read range ({span} lines) of '{target_path}' exceeds 400 lines. "
-                        "Use 'phonix_get_pruned_context' or smaller StartLine/EndLine slices (<= 400 lines)."
+                        f"[Phonix Smart Gate] Bounded read range ({span} lines) of '{target_path}' exceeds 400 lines. "
+                        f"Call MCP tool 'phonix_get_pruned_context(query=\"{p.name} | <target_symbol_or_slug>\")' instead."
                     )
                     return respond("deny", reason, tool_name, args)
             except (ValueError, TypeError):
@@ -334,18 +417,10 @@ def handle_pre_tool_use() -> int:
                     line_count = 0
                 if line_count > large_file_limit:
                     reason = (
-                        f"[Phonix Advisory] Unbounded read of large file '{target_path}' ({line_count} lines > {large_file_limit} lines). "
-                        "Use 'phonix_get_pruned_context' or bounded StartLine/EndLine slices."
+                        f"[Phonix Smart Gate] Unbounded read of large file '{target_path}' ({line_count} lines > {large_file_limit} lines). "
+                        f"Call MCP tool 'phonix_get_pruned_context(query=\"{p.name} | <target_symbol_or_slug>\")' instead of splitting into multiple read_file calls."
                     )
                     return respond("deny", reason, tool_name, args)
-
-    # Rule: Guard dangerous exfiltration and destructive commands against run_command
-    if tool_name in ("run_command", "Bash", "bash", "execute_command"):
-        cmd = args.get("CommandLine") or args.get("command") or args.get("cmd") or ""
-        for pat in MALICIOUS_COMMAND_PATTERNS:
-            if re.search(pat, cmd):
-                reason = "[Phonix Zero-Trust Gate] Command warning: detected potential secret exposure or unsafe pattern."
-                return respond("deny", reason, tool_name, args)
 
     # Turn budget warning threshold
     if turn_count >= turn_warn:

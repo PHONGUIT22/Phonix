@@ -472,7 +472,8 @@ def test_antigravity_hooks_contract() -> None:
         handle_pre_tool_use()
         res_large = json.loads(out_buf.getvalue().strip())
         assert res_large["decision"] == "deny"
-        assert "[Phonix Advisory]" in res_large["reason"]
+        assert "[Phonix Smart Gate]" in res_large["reason"]
+        assert "phonix_get_pruned_context" in res_large["reason"]
 
     finally:
         sys.stdin = old_stdin

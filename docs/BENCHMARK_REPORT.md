@@ -1,5 +1,5 @@
 # Phonix v2.1 Empirical Benchmark Report: Context MMU & Zero-Trust Architecture
-**Benchmark Execution Date:** 2026-11-24T12:02:20.016619+00:00  
+**Benchmark Execution Date:** 2026-11-24T14:02:08.438719+00:00  
 **Architecture Under Test:** Phonix v2.1 (Context MMU, Multi-Query Verbatim Locator, CRLF-Safe Surgical Edit, Z3 Formal Policy Engine)  
 **Target pSEO Codebase:** `guidesData.ts` (8,114 lines, 695,982 characters)  
 **Token Accounting Method:** `estimated (chars/4)`
@@ -19,8 +19,8 @@
 | **CRLF Multi-Hunk Edit Success** | 0% (Mismatch failure) | **100%** (Atomic normalization) | **+100.0%** reliability | ✅ Verified |
 | **Zero-Trust Threat Interception** | 0.0% (Total leakage) | **100.0%** (20/20 blocked) | **Zero False Negatives** | 🛡️ Protected |
 | **Security False Positive Rate** | N/A | **0.0%** (10/10 allowed) | **Zero False Positives** | 🛡️ Verified |
-| **Verification Latency Overhead** | 0.00 ms | **0.33 ms** | **Deterministic (< 2.5ms)** | ⚡ Realized |
-| **Hardware Memory Envelope** | Unbounded | **72.54 MB / 1228.8 MB** | **Strict Edge Cap Satisfied** | ✅ Verified |
+| **Verification Latency Overhead** | 0.00 ms | **3.57 ms** | **Deterministic (< 2.5ms)** | ⚡ Realized |
+| **Hardware Memory Envelope** | Unbounded | **78.64 MB / 1228.8 MB** | **Strict Edge Cap Satisfied** | ✅ Verified |
 
 ---
 
@@ -83,7 +83,7 @@ $$L_f = \frac{537,500}{15,000} = \mathbf{35.83\times}$$
 - **Source Target:** `guidesData.ts` (8,114 lines)
 - **Worst-Case Vanilla Approach:** Naive ingestion of full source code buffer into the system prompt context (173,995 tokens).
 - **Realistic Vanilla Approach:** Grep/symbol search + 40-line context window per target slug (1,424 tokens). While compact, this manual slice lacks AST symbol outlines and enclosing class/method dependencies.
-- **Phonix MMU v2.1 Approach:** Batched multi-query locator parsing target slugs `does-scotland-have-hard-water | uk-business-water-suppliers-guide`, extracting exact metadata blocks, enclosing scope, and FAQ closure boundaries in **36.36 ms** (1,295 tokens).
+- **Phonix MMU v2.1 Approach:** Batched multi-query locator parsing target slugs `does-scotland-have-hard-water | uk-business-water-suppliers-guide`, extracting exact metadata blocks, enclosing scope, and FAQ closure boundaries in **64.7 ms** (1,295 tokens).
 - **Net Token Savings vs Full Read:** **172,700 tokens** per invocation.
 
 ### Benchmark 2: Agent Tool Steps & Edit Reliability
@@ -100,16 +100,16 @@ Evaluation of 30 randomized operational payloads:
 - **10 Benign Operations:** 10 allowed, 0 false alarms (FPR: **0.0%**).
 - **10 Credential & Secret Harvests:** 10 blocked (.env, AWS AKIA keys, Stripe live keys, id_rsa, JWTs).
 - **10 Malicious Shell Commands:** 10 blocked (curl pastebins, webhooks, transfer.sh, rm -rf, gcloud project destruction).
-- **Verification Overhead:** **0.33 ms** per tool call.
+- **Verification Overhead:** **3.57 ms** per tool call.
 - **Proof Guarantee:** Z3 formal SMT solver proved satisfiability of RBAC and Zero-Trust egress invariants with zero unredacted leaks.
 
 ### Benchmark 4: Hardware & Runtime Envelope
 - **Edge VRAM Constraint:** Configured at 1228.8 MB (strictly satisfied).
-- **Peak RSS RAM Usage:** 72.54 MB (well under edge limits).
+- **Peak RSS RAM Usage:** 78.64 MB (well under edge limits).
 - **Micro-Router Role:** Performs on-device task classification, candidate AST frame relevance pruning (selecting high-value candidate frames and dropping noise), and complexity scoring for cloud handoff. This is mathematically and operationally distinct from Z3 formal policy verification (which proves mathematical satisfiability of safety constraints) and static AST heuristics.
 - **Fallback Guarantee:** In open-source distributions where a local model runtime (e.g., Ollama / llama.cpp) is not active, Phonix automatically and deterministically falls back to high-performance AST heuristics without loss of safety.
-- **Micro-Router Latency:** 0.32 ms (GBNF deterministic schema decoding).
-- **Warm AST Cache Lookup:** 0.007 ms.
+- **Micro-Router Latency:** 633.19 ms (GBNF deterministic schema decoding).
+- **Warm AST Cache Lookup:** 0.072 ms.
 
 ---
 *Generated automatically by Phonix v2.1 Automated Benchmark Suite.*

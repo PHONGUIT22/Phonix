@@ -318,7 +318,8 @@ def test_agy_lifecycle_hooks() -> None:
         handle_pre_tool_use()
         res_code_unbounded = json.loads(out_buf.getvalue())
         assert res_code_unbounded["decision"] == "deny"
-        assert "Phonix Advisory" in res_code_unbounded["reason"]
+        assert "Phonix Smart Gate" in res_code_unbounded["reason"]
+        assert "phonix_get_pruned_context" in res_code_unbounded["reason"]
 
         # Allow bounded read_file on non-code files (e.g. pyproject.toml <= 400 lines)
         sys.stdin = io.StringIO(json.dumps({"toolCall": {"name": "read_file", "args": {"Path": "pyproject.toml", "StartLine": 1, "EndLine": 50}}}))

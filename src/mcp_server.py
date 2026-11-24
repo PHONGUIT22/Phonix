@@ -472,6 +472,8 @@ class PhonixMCPServer:
             return remote
 
         core = self._resolve_active_core(query=path_prefix, explicit_workspace=workspace_root)
+        if core.file_trie.total_files == 0 and not core._frame_registry:
+            core.index_workspace()
         cached = core.kv_prefix_cache.get_prefix("repo_symbol_map")
         raw_map = cached.text if cached else ""
 
@@ -909,6 +911,8 @@ class PhonixMCPServer:
                 )
 
         # Step A: Speculative Trie matching for file paths
+        if core.file_trie.total_files == 0 and not core._frame_registry:
+            core.index_workspace()
         core.speculative_inspector.reset_stream()
         inspection = core.speculative_inspector.process_chunk(query)
 
