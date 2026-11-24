@@ -405,3 +405,37 @@ def test_tree_sitter_slicer_path_with_mock_parser(monkeypatch: pytest.MonkeyPatc
     assert frames[0].symbol_type == "function"
     assert "queryDb" in frames[0].dependencies
 
+
+def test_one_click_full_armor_deploys_and_cleans_all_three(tmp_path: Path) -> None:
+    """inject-rule deploys PhonixHP.md + mcp_config.json + hooks.json, and clean-rule removes all 3."""
+    from fastapi.testclient import TestClient
+    from src.gateway.proxy_server import create_gateway_app
+
+    target_ws = tmp_path / "foreign_app"
+    target_ws.mkdir()
+    (target_ws / "app.py").write_text("print('ok')\n", encoding="utf-8")
+
+    app = create_gateway_app(workspace_root=str(REPO_ROOT), auto_index=False)
+    client = TestClient(app)
+
+    assert client.post("/v1/workspace/attach", json={"workspace_path": str(target_ws)}).status_code == 200
+    inj = client.post("/v1/workspace/inject-rule", json={"workspace_path": str(target_ws)})
+    assert inj.status_code == 200
+
+    assert (target_ws / ".agents" / "rules" / "PhonixHP.md").is_file()
+    assert (target_ws / ".agents" / "mcp_config.json").is_file()
+    hooks_file = target_ws / ".agents" / "hooks.json"
+    assert hooks_file.is_file()
+    hooks_json = json.loads(hooks_file.read_text(encoding="utf-8"))
+    assert "phonix-quota-and-security-gate" in hooks_json
+
+    ws_list = client.get("/v1/workspaces").json()
+    matched = [w for w in ws_list if Path(w["workspace_path"]).resolve() == target_ws.resolve()]
+    assert matched and matched[0]["hooks_armed"] is True
+
+    cln = client.post("/v1/workspace/clean-rule", json={"workspace_path": str(target_ws)})
+    assert cln.status_code == 200
+    assert not (target_ws / ".agents" / "rules" / "PhonixHP.md").exists()
+    assert not (target_ws / ".agents" / "mcp_config.json").exists()
+    assert not hooks_file.exists()
+

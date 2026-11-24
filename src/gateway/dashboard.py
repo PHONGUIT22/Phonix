@@ -143,10 +143,10 @@ def render_dashboard_html() -> str:
           <button
             onclick="injectRuleAction()"
             id="btnInject"
-            title="Tạo .agents/rules/PhonixHP.md và cấu hình .agents/mcp_config.json để AI CLI trong dự án nhận diện ngay tool phonix-mmu."
+            title="1-Click nạp dự án và cấp đủ 3 món: .agents/rules/PhonixHP.md, .agents/mcp_config.json và .agents/hooks.json."
             class="btn-yellow px-5 py-2.5 rounded-lg text-sm font-semibold shadow-md flex items-center gap-2"
           >
-            <span>🟡</span> [ Cấp Quota Armor & Cấu Hình MCP Tool ]
+            <span>🟡</span> [ 1-Click Cấp Full Giáp (Rule + MCP + Hooks) ]
           </button>
 
           <button
@@ -344,7 +344,9 @@ def render_dashboard_html() -> str:
           let badgeText = 'Read-Only (RAM Only)';
           if (isArmed) {
             badgeClass = 'badge-armed';
-            badgeText = '🛡️ Fully Armed (Rule + MCP Tool Sẵn Sàng)';
+            badgeText = ws.hooks_armed
+              ? '🛡️ Fully Armed (Rule + MCP + Hooks)'
+              : '🛡️ Fully Armed (Rule + MCP Tool Sẵn Sàng)';
           } else if (isRuleOnly) {
             badgeClass = 'badge-injected';
             badgeText = 'Protected (Rule Only)';
@@ -440,24 +442,44 @@ def render_dashboard_html() -> str:
       }
     }
 
+    async function ensureAttachedSilently(path) {
+      const res = await fetch('/v1/workspace/attach', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace_path: path })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Không thể nạp dự án. Kiểm tra đường dẫn tồn tại.');
+      }
+    }
+
     async function injectRuleAction(pathOverride = null) {
       const path = pathOverride || getTargetInput();
       if (!path) return;
 
       const confirmed = confirm(
-        `Xác nhận cấp Quota Armor và nạp MCP Tool (phonix-mmu) vào dự án: \\n${path}\\n\\nThao tác này sẽ tạo file .agents/rules/PhonixHP.md, cấu hình .agents/mcp_config.json (phonix-mmu) và cập nhật .git/info/exclude để không làm bẩn git.`
+        `Xác nhận 1-Click cấp Full Giáp vào dự án:\\n${path}\\n\\nThao tác này sẽ tạo:\\n- .agents/rules/PhonixHP.md\\n- .agents/mcp_config.json (phonix-mmu)\\n- .agents/hooks.json (SessionStart 0-token + PreToolUse guard)\\nvà ẩn .agents/ trong .git/info/exclude.`
       );
       if (!confirmed) return;
 
       try {
-        const res = await fetch('/v1/workspace/inject-rule', {
+        let res = await fetch('/v1/workspace/inject-rule', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspace_path: path })
         });
+        if (res.status === 403) {
+          await ensureAttachedSilently(path);
+          res = await fetch('/v1/workspace/inject-rule', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspace_path: path })
+          });
+        }
         const data = await res.json();
         if (res.ok) {
-          showToast(data.message || `Đã cấp Quota Armor và cấu hình MCP Tool thành công vào ${path}!`, true);
+          showToast(data.message || `Đã cấp Full Giáp (Rule + MCP + Hooks) thành công vào ${path}!`, true);
           await refreshAll();
         } else {
           showToast(data.detail || 'Lỗi khi thả rule.', false);
@@ -471,18 +493,26 @@ def render_dashboard_html() -> str:
       const path = pathOverride || getTargetInput();
       if (!path) return;
 
-      const confirmed = confirm(`Xác nhận thu hồi Quota Armor và xóa cấu hình MCP khỏi:\\n${path}`);
+      const confirmed = confirm(`Xác nhận thu hồi Full Giáp (Rule + MCP + Hooks) khỏi:\\n${path}`);
       if (!confirmed) return;
 
       try {
-        const res = await fetch('/v1/workspace/clean-rule', {
+        let res = await fetch('/v1/workspace/clean-rule', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspace_path: path })
         });
+        if (res.status === 403) {
+          await ensureAttachedSilently(path);
+          res = await fetch('/v1/workspace/clean-rule', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspace_path: path })
+          });
+        }
         const data = await res.json();
         if (res.ok) {
-          showToast(data.message || `Đã thu hồi Quota Armor, gỡ MCP config và dọn sạch git exclude khỏi ${path}!`, true);
+          showToast(data.message || `Đã thu hồi sạch Rule, MCP, Hooks và git exclude khỏi ${path}!`, true);
           await refreshAll();
         } else {
           showToast(data.detail || 'Lỗi khi dọn dẹp rule.', false);

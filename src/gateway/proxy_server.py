@@ -371,10 +371,112 @@ def _clean_target_mcp_config(workspace_root: str | Path) -> bool:
         return False
 
 
+def _build_target_hook_command(action: str) -> str:
+    """Builds a portable hook command that works from any target workspace directory."""
+    import shutil
+
+    py_cmd = sys.executable if (sys.executable and Path(sys.executable).is_file()) else (shutil.which("python") or "python")
+    repo_root_repr = repr(str(PHONIX_REPO_ROOT.resolve()))
+    return (
+        f'"{py_cmd}" -c "import sys; sys.path.insert(0, {repo_root_repr}); '
+        f'from src.agy_hooks import main; raise SystemExit(main())" {action}'
+    )
+
+
+def _ensure_target_hooks_config(workspace_root: str | Path) -> bool:
+    """Configures <workspace_root>/.agents/hooks.json with phonix-quota-and-security-gate."""
+    try:
+        ws_path = Path(workspace_root).resolve()
+        agents_dir = ws_path / ".agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        hooks_path = agents_dir / "hooks.json"
+
+        local_hooks: dict[str, Any] = {}
+        if hooks_path.is_file():
+            try:
+                loaded = json.loads(hooks_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    local_hooks = loaded
+            except Exception as e_parse:
+                logger.debug("Could not parse existing %s: %s", hooks_path, e_parse)
+
+        local_hooks["phonix-quota-and-security-gate"] = {
+            "enabled": True,
+            "SessionStart": [
+                {
+                    "type": "command",
+                    "command": _build_target_hook_command("session-start"),
+                    "timeout": 10,
+                }
+            ],
+            "UserPromptSubmit": [
+                {
+                    "type": "command",
+                    "command": _build_target_hook_command("user-prompt-submit"),
+                    "timeout": 5,
+                }
+            ],
+            "PreToolUse": [
+                {
+                    "matcher": "read_file|view_file|read_file_lines|run_command|manage_task|ManageTask|Bash|bash|execute_command",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _build_target_hook_command("pre-tool-use"),
+                            "timeout": 5,
+                        }
+                    ],
+                }
+            ],
+        }
+
+        hooks_path.write_text(json.dumps(local_hooks, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        logger.info("Configured phonix-quota-and-security-gate in %s", hooks_path)
+        return True
+    except Exception as exc:
+        logger.debug("Could not configure target hooks.json in %s: %s", workspace_root, exc)
+        return False
+
+
+def _clean_target_hooks_config(workspace_root: str | Path) -> bool:
+    """Removes phonix-quota-and-security-gate from <workspace_root>/.agents/hooks.json."""
+    try:
+        ws_path = Path(workspace_root).resolve()
+        agents_dir = ws_path / ".agents"
+        hooks_path = agents_dir / "hooks.json"
+
+        if hooks_path.is_file():
+            try:
+                loaded = json.loads(hooks_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    loaded.pop("phonix-quota-and-security-gate", None)
+                    if not loaded:
+                        hooks_path.unlink(missing_ok=True)
+                        logger.info("Removed empty %s", hooks_path)
+                    else:
+                        hooks_path.write_text(json.dumps(loaded, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                        logger.info("Removed phonix-quota-and-security-gate from %s", hooks_path)
+            except Exception as e_clean:
+                logger.debug("Could not process %s during cleanup: %s", hooks_path, e_clean)
+
+        try:
+            if agents_dir.is_dir() and not any(agents_dir.iterdir()):
+                agents_dir.rmdir()
+        except Exception:
+            pass
+
+        return True
+    except Exception as exc:
+        logger.debug("Failed cleaning hooks config in %s: %s", workspace_root, exc)
+        return False
+
+
 ensure_phonix_hp_rule = _ensure_phonix_hp_rule
 clean_phonix_hp_rule = _clean_phonix_hp_rule
 ensure_target_mcp_config = _ensure_target_mcp_config
 clean_target_mcp_config = _clean_target_mcp_config
+ensure_target_hooks_config = _ensure_target_hooks_config
+clean_target_hooks_config = _clean_target_hooks_config
 
 
 # --- Core Gateway Pipeline Controller ---
@@ -1218,6 +1320,15 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
                 except Exception:
                     pass
 
+            hooks_exists = False
+            hooks_file = p / ".agents" / "hooks.json"
+            if hooks_file.is_file():
+                try:
+                    hooks_cfg = json.loads(hooks_file.read_text(encoding="utf-8"))
+                    hooks_exists = "phonix-quota-and-security-gate" in hooks_cfg
+                except Exception:
+                    pass
+
             if rule_exists and mcp_exists:
                 status = "Fully Armed (Rule + MCP)"
                 mode = "Protected (Rule + MCP)"
@@ -1233,6 +1344,7 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
                 "name": p.name or path_str,
                 "status": status,
                 "mode": mode,
+                "hooks_armed": hooks_exists,
                 "indexed_files": ws_core.file_trie.total_files,
                 "ast_frames": len(ws_core._frame_registry),
             })
@@ -1288,22 +1400,23 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
         path_str = str(target_path)
         ok_rule = _ensure_phonix_hp_rule(target_path)
         ok_mcp = _ensure_target_mcp_config(target_path)
+        ok_hooks = _ensure_target_hooks_config(target_path)
         rule_file = target_path / ".agents" / "rules" / "PhonixHP.md"
-        if not ok_rule or not rule_file.is_file() or not ok_mcp:
-            raise HTTPException(status_code=500, detail=f"Failed deploying rule and MCP config to '{target_path}'.")
+        if not ok_rule or not rule_file.is_file() or not ok_mcp or not ok_hooks:
+            raise HTTPException(status_code=500, detail=f"Failed deploying rule, MCP, and hooks config to '{target_path}'.")
 
-        logger.info("User explicitly injected PhonixHP.md and MCP config into '%s'", target_path.name)
+        logger.info("User explicitly injected PhonixHP.md, MCP config, and hooks.json into '%s'", target_path.name)
         return {
             "status": "success",
             "workspace_path": path_str,
             "rule_path": str(rule_file),
             "mode": "armor_and_mcp_ready",
-            "message": "Successfully deployed PhonixHP.md rule and configured .agents/mcp_config.json (phonix-mmu ready).",
+            "message": "Successfully deployed PhonixHP.md, .agents/mcp_config.json (phonix-mmu ready), and .agents/hooks.json!",
         }
 
     @app.post("/v1/workspace/clean-rule")
     async def clean_rule_api(payload: dict[str, Any]) -> dict[str, Any]:
-        """Removes .agents/rules/PhonixHP.md, .agents/mcp_config.json, and cleans up Phonix markers from .git/info/exclude."""
+        """Removes .agents/rules/PhonixHP.md, .agents/mcp_config.json, .agents/hooks.json, and git exclude markers."""
         ws_raw = str(payload.get("workspace_path", "")).strip().strip("'\"")
         if not ws_raw:
             raise HTTPException(status_code=400, detail="workspace_path is required.")
@@ -1318,12 +1431,13 @@ def create_gateway_app(workspace_root: str = ".", auto_index: bool = True) -> An
         path_str = str(target_path)
         _clean_phonix_hp_rule(target_path)
         _clean_target_mcp_config(target_path)
-        logger.info("User explicitly cleaned PhonixHP.md and MCP config from '%s'", target_path.name)
+        _clean_target_hooks_config(target_path)
+        logger.info("User explicitly cleaned PhonixHP.md, MCP config, and hooks.json from '%s'", target_path.name)
         return {
             "status": "success",
             "workspace_path": path_str,
             "mode": "read_only",
-            "message": "Successfully revoked PhonixHP rule, removed MCP config, and cleaned git exclude.",
+            "message": "Đã thu hồi sạch PhonixHP.md, mcp_config.json, hooks.json và git exclude.",
         }
 
     @app.post("/v1/workspace/detach")

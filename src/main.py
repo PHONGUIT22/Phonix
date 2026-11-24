@@ -25,6 +25,7 @@ from src.gateway.proxy_server import (
     GatewayCore,
     PHONIX_HP_RULE_CONTENT,
     _ensure_phonix_hp_rule,
+    _ensure_target_hooks_config,
     _ensure_target_mcp_config,
     create_gateway_app,
     is_loopback_host,
@@ -288,6 +289,11 @@ def attach_workspace(target_dir: str = ".") -> int:
     _ensure_target_mcp_config(target_path)
     mcp_config_path = target_path / ".agents" / "mcp_config.json"
     print(f" [PASS] Registered phonix-mmu MCP server in {mcp_config_path}")
+
+    # 3. Register hooks in target's .agents/hooks.json
+    _ensure_target_hooks_config(target_path)
+    hooks_config_path = target_path / ".agents" / "hooks.json"
+    print(f" [PASS] Registered quota & security hooks in {hooks_config_path}")
 
     # 3. Index target codebase in memory (Read-Only)
     print(" [*] Indexing target codebase AST frames in memory (Read-Only)...")
